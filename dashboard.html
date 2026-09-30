@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BLS Proxy</title>
+<style>
+:root{--bg:#fff;--fg:#1b1b1b;--mut:#6b6b6b;--ln:#dcdcdc;--ok:#1a7f37;--bad:#c62828;--warn:#b26a00;--acc:#2456d6}
+@media(prefers-color-scheme:dark){:root{--bg:#131416;--fg:#e8e8e8;--mut:#9a9a9a;--ln:#2b2d31;--ok:#4cc26a;--bad:#ff6b6b;--warn:#e3a33a;--acc:#7aa2ff}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,sans-serif}
+.wrap{max-width:1200px;margin:0 auto}
+h1{font-size:18px;margin:0 0 4px}
+h2{font-size:12px;margin:20px 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+.sc{overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--ln);white-space:nowrap}
+th{color:var(--mut);font-weight:600}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.off{color:var(--mut)}
+textarea,input,select,button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--ln);border-radius:4px;padding:6px 8px}
+textarea{width:100%;height:110px;font-family:ui-monospace,Menlo,monospace}
+button{cursor:pointer}button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{color:var(--bad)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+#err{color:var(--bad)}#msg{color:var(--mut);white-space:pre-wrap}
+</style></head><body><div class="wrap">
+<h1>BLS Proxy</h1>
+<div id="tot" class="off"></div><div id="err"></div>
+
+<h2>Пулы</h2>
+<div class="sc"><table id="sum"></table></div>
+
+<h2>Добавить прокси</h2>
+<textarea id="ta" placeholder="По одному в строке:&#10;host:port:user:pass&#10;user:pass@host:port&#10;socks5://user:pass@host:port&#10;host:port"></textarea>
+<div class="row">
+ <select id="scheme"><option>socks5</option><option>http</option><option>https</option><option>socks5h</option></select>
+ <select id="kind"><option>shared</option><option>dedicated</option><option>mobile</option></select>
+ <input id="pool" placeholder="пул (необязательно)" size="18">
+ <label>одновременно аренд <input id="ml" type="number" min="1" max="10" value="1" style="width:60px"></label>
+ <button class="p" id="add">Добавить / обновить</button>
+</div>
+<div id="msg"></div>
+
+<h2>Прокси</h2>
+<div class="row">
+ <input id="q" placeholder="фильтр: host, пул, аккаунт, статус" size="34">
+ <button data-a="on">Включить</button>
+ <button data-a="off">Выключить</button>
+ <button data-a="unq">Снять карантин</button>
+ <button data-a="delete" class="d">Удалить</button>
+ <span id="selc" class="off"></span>
+</div>
+<div class="sc"><table id="px"></table></div>
+
+<h2>Активные аренды</h2>
+<div class="sc"><table id="ls"></table></div>
+
+<h2>Последние события</h2>
+<div class="sc"><table id="ev"></table></div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const tm=x=>x?new Date(x).toLocaleTimeString('ru-RU'):'—';
+let S={summary:[],proxies:[],leases:[],events:[]};const sel=new Set();
+
+async function api(path,body){
+  const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+  if(!r.ok)throw new Error(r.status+' '+(await r.text()).slice(0,300));
+  return r.json();
+}
+function status(p){
+  if(!p.enabled)return['off','выкл'];
+  if(p.quarantined_until&&new Date(p.quarantined_until)>Date.now())return['bad','карантин до '+tm(p.quarantined_until)];
+  if(p.active_leases>=p.max_leases)return['warn','занят'];
+  if(p.free_at&&new Date(p.free_at)>Date.now())return['warn','кулдаун до '+tm(p.free_at)];
+  return['ok','свободен'];
+}
+function render(){
+  const q=$('#q').value.toLowerCase();
+  const free=S.proxies.filter(p=>status(p)[0]==='ok').length;
+  $('#tot').textContent=`всего ${S.proxies.length} · свободно ${free} · аренд ${S.leases.length}`;
+  $('#sum').innerHTML='<tr><th>тип</th><th>пул</th><th>вкл</th><th>свободно</th><th>кулдаун</th><th>занято</th><th>карантин</th></tr>'+
+    S.summary.map(r=>`<tr><td>${esc(r.kind)}</td><td>${esc(r.pool)}</td><td>${r.enabled}</td><td class="ok">${r.available}</td><td>${r.cooling}</td><td>${r.full}</td><td class="${r.quarantined?'bad':''}">${r.quarantined}</td></tr>`).join('');
+  const rows=S.proxies.filter(p=>!q||[p.id,p.host,p.pool,p.kind,(p.accounts||[]).join(' '),status(p)[1]].join(' ').toLowerCase().includes(q));
+  $('#px').innerHTML='<tr><th><input type="checkbox" id="all"></th><th>id</th><th>адрес</th><th>пул</th><th>статус</th><th>аккаунты</th><th>ошибок</th><th>пинг мс</th><th>посл. ok</th><th>причина карантина</th></tr>'+
+    rows.map(p=>{const[c,t]=status(p);return `<tr><td><input type="checkbox" data-id="${esc(p.id)}" ${sel.has(p.id)?'checked':''}></td><td>${esc(p.id)}</td><td>${esc(p.scheme)}://${esc(p.host)}:${p.port}${p.username?'':' <span class="warn">(без логина)</span>'}</td><td>${esc(p.pool||'—')}</td><td class="${c}">${esc(t)}</td><td>${esc((p.accounts||[]).join(', ')||'—')}</td><td>${p.consecutive_failures}/${p.probe_failures}</td><td class="${p.last_probe_ok===false?'bad':''}">${p.last_latency_ms??'—'}</td><td>${tm(p.last_ok_at)}</td><td>${esc(p.quarantine_reason||'')}</td></tr>`}).join('');
+  $('#selc').textContent=sel.size?`выбрано: ${sel.size}`:'';
+  $('#ls').innerHTML='<tr><th>аккаунт</th><th>прокси</th><th>цель</th><th>выдан</th><th>истекает</th></tr>'+
+    S.leases.map(l=>`<tr><td>${esc(l.account_id)}</td><td>${esc(l.proxy_id)}</td><td>${esc(l.purpose)}</td><td>${tm(l.acquired_at)}</td><td>${tm(l.expires_at)}</td></tr>`).join('');
+  $('#ev').innerHTML='<tr><th>время</th><th>прокси</th><th>аккаунт</th><th>событие</th><th>код</th><th>фаза</th></tr>'+
+    S.events.map(e=>`<tr><td>${tm(e.created_at)}</td><td>${esc(e.proxy_id||'')}</td><td>${esc(e.account_id||'')}</td><td class="${e.event_type==='error'||e.event_type==='quarantined'?'bad':e.event_type==='global_wave'?'warn':''}">${esc(e.event_type)}</td><td>${esc(e.error_code||'')}</td><td>${esc(e.phase||'')}</td></tr>`).join('');
+}
+async function refresh(){
+  try{S=await api('/admin/api/state');$('#err').textContent='';render();}
+  catch(e){$('#err').textContent='Ошибка: '+e.message}
+}
+async function run(fn){try{await fn()}catch(e){$('#err').textContent='Ошибка: '+e.message;return}await refresh()}
+
+$('#add').onclick=()=>run(async()=>{
+  const r=await api('/admin/api/proxies',{text:$('#ta').value,scheme:$('#scheme').value,kind:$('#kind').value,pool:$('#pool').value.trim()||null,max_leases:+$('#ml').value||1});
+  $('#msg').textContent=`добавлено: ${r.inserted}, обновлено: ${r.updated}`+(r.errors.length?'\nпропущено:\n'+r.errors.join('\n'):'');
+  if(!r.errors.length)$('#ta').value='';
+});
+document.querySelectorAll('button[data-a]').forEach(b=>b.onclick=()=>{
+  const k=b.dataset.a,ids=[...sel];
+  if(!ids.length)return alert('ничего не выбрано');
+  if(k==='delete'&&!confirm('Удалить '+ids.length+' прокси? Действие необратимо.'))return;
+  const m={on:['enable',{enabled:true}],off:['enable',{enabled:false}],delete:['delete',{}],unq:['unquarantine',{}]}[k];
+  run(async()=>{await api('/admin/api/proxies/'+m[0],{ids,...m[1]});if(k==='delete')sel.clear()});
+});
+$('#px').addEventListener('change',e=>{
+  const t=e.target;
+  if(t.id==='all')document.querySelectorAll('#px input[data-id]').forEach(c=>{c.checked=t.checked;t.checked?sel.add(c.dataset.id):sel.delete(c.dataset.id)});
+  else if(t.dataset.id){t.checked?sel.add(t.dataset.id):sel.delete(t.dataset.id)}
+  $('#selc').textContent=sel.size?`выбрано: ${sel.size}`:'';
+});
+$('#q').oninput=render;
+refresh();setInterval(refresh,10000);
+</script></body></html>
