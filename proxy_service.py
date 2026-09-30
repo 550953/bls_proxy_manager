@@ -194,11 +194,16 @@ async def acquire(req: AcquireRequest):
         req.account_id, req.count, req.ttl_seconds, req.purpose,
         req.client_id, req.exclude, req.replace,
     )
+    # 403 на нескольких разных прокси подряд — виноват профиль браузера, а не прокси.
+    reset = bool(await pools["issuer"].fetchval(
+        f"select {SCHEMA}.account_needs_reset($1)", req.account_id))
+    action = {"account_action": "reset_profile"} if reset else {}
     if not rows:
         wait_s = await pools["issuer"].fetchval(f"select {SCHEMA}.next_available_in($1)", req.purpose)
         # Пусто — норма для пула: ждать wait_s и повторять, аккаунт не выключать.
-        return {"leases": [], "retry_after_seconds": wait_s}
+        return {"leases": [], "retry_after_seconds": wait_s, **action}
     return {
+        **action,
         "leases": [
             {
                 "lease_id": str(r["lease_id"]),
@@ -243,6 +248,17 @@ async def release(req: ReleaseRequest):
         f"select {SCHEMA}.release_lease($1::uuid, $2, $3, $4, $5::jsonb)",
         req.lease_id, req.reason, req.error_code, req.phase, json.dumps(req.detail),
     )
+    return {"ok": True}
+
+
+class ProfileResetAck(BaseModel):
+    account_id: str
+
+
+@bot.post("/account/profile_reset")
+async def profile_reset(req: ProfileResetAck):
+    """Бот сообщает: профиль удалён, браузер стартует с чистого листа. Счётчик 403 обнуляется."""
+    await pools["reporter"].execute(f"select {SCHEMA}.ack_profile_reset($1)", req.account_id)
     return {"ok": True}
 
 
