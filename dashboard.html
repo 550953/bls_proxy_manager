@@ -87,7 +87,7 @@ function render(){
   $('#ls').innerHTML='<tr><th>аккаунт</th><th>прокси</th><th>цель</th><th>выдан</th><th>истекает</th></tr>'+
     S.leases.map(l=>`<tr><td>${esc(l.account_id)}</td><td>${esc(l.proxy_id)}</td><td>${esc(l.purpose)}</td><td>${tm(l.acquired_at)}</td><td>${tm(l.expires_at)}</td></tr>`).join('');
   $('#ev').innerHTML='<tr><th>время</th><th>прокси</th><th>аккаунт</th><th>событие</th><th>код</th><th>фаза</th></tr>'+
-    S.events.map(e=>`<tr><td>${tm(e.created_at)}</td><td>${esc(e.proxy_id||'')}</td><td>${esc(e.account_id||'')}</td><td class="${e.event_type==='error'||e.event_type==='quarantined'?'bad':e.event_type==='global_wave'?'warn':''}">${esc(e.event_type)}</td><td>${esc(e.error_code||'')}</td><td>${esc(e.phase||'')}</td></tr>`).join('');
+    S.events.map(e=>`<tr><td>${tm(e.created_at)}</td><td>${esc(e.proxy_id||'')}</td><td>${esc(e.account_id||'')}</td><td class="${e.event_type==='error'||e.event_type==='quarantined'||e.event_type==='reset_requested'?'bad':e.event_type==='global_wave'?'warn':''}">${esc(e.event_type)}</td><td>${esc(e.error_code||'')}</td><td>${esc(e.phase||'')}</td></tr>`).join('');
 }
 async function refresh(){
   try{S=await api('/admin/api/state');$('#err').textContent='';render();}
