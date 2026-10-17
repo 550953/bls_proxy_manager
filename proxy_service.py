@@ -8,6 +8,8 @@
 
 Доступ:
   * боты      — заголовок  X-Bot-Token: $BLS_BOT_TOKEN
+  * OCR       — заголовок  X-Bot-Token: $BLS_BOT_TOKEN_OCR (только /ocr/pool и /ocr/report;
+                токен кликера туда не подходит и наоборот; не задан -> /ocr/* отвечает 503)
   * дашборд   — HTTP Basic: логин $BLS_DASH_USER, пароль $BLS_DASH_PASS
   * /livez    — открыт, отдаёт только {"ok": true} (для health-check деплоя)
 
@@ -53,6 +55,8 @@ def _req(name: str) -> str:
 DASH_USER = _req("BLS_DASH_USER")      # логин дашборда
 DASH_PASS = _req("BLS_DASH_PASS")      # пароль дашборда
 BOT_TOKEN = _req("BLS_BOT_TOKEN")      # токен для ботов (X-Bot-Token)
+BOT_TOKEN_OCR = os.environ.get("BLS_BOT_TOKEN_OCR", "")  # токен OCR-сервиса; пусто -> /ocr/* выключено
+OCR_REFRESH_S = int(os.environ.get("BLS_OCR_REFRESH_S", "60"))  # как часто OCR перечитывает пул
 
 DB_HOST = os.environ.get("BLS_DB_HOST", "")
 DB_PORT = int(os.environ.get("BLS_DB_PORT", "5432"))
@@ -85,6 +89,7 @@ DASH_FILE = Path(__file__).with_name("dashboard.html")
 
 ALLOWED_SCHEMES = ("http", "https", "socks5", "socks5h")
 ALLOWED_KINDS = ("shared", "dedicated", "mobile")
+ALLOWED_PURPOSES = ("bls", "ocr")
 
 pools: dict[str, asyncpg.Pool] = {}
 _target_cache: dict[int, tuple[str, int]] = {}
@@ -124,6 +129,8 @@ async def lifespan(app: FastAPI):
         log.info("pool run reset: re-enabled %s auto-disabled proxies", re_enabled)
     except Exception:
         log.exception("admin_reset_run failed (применён ли sql/05_fault_ladder.sql?)")
+    if BOT_TOKEN_OCR and secrets.compare_digest(BOT_TOKEN_OCR.encode(), BOT_TOKEN.encode()):
+        log.warning("BLS_BOT_TOKEN_OCR совпадает с BLS_BOT_TOKEN: токены лучше разделить")
     tasks = [
         asyncio.create_task(prober_loop(), name="prober_loop"),
         asyncio.create_task(cron_loop(), name="cron_loop"),
@@ -148,6 +155,13 @@ app = FastAPI(title="bls-proxy-service", lifespan=lifespan,
 # --------------------------------------------------------------------------- #
 def require_bot(x_bot_token: str = Header(default="")) -> None:
     if not secrets.compare_digest(x_bot_token.encode(), BOT_TOKEN.encode()):
+        raise HTTPException(401, "bad bot token")
+
+
+def require_ocr(x_bot_token: str = Header(default="")) -> None:
+    if not BOT_TOKEN_OCR:
+        raise HTTPException(503, "ocr api disabled: BLS_BOT_TOKEN_OCR is not set")
+    if not secrets.compare_digest(x_bot_token.encode(), BOT_TOKEN_OCR.encode()):
         raise HTTPException(401, "bad bot token")
 
 
@@ -297,6 +311,52 @@ app.include_router(bot)
 
 
 # --------------------------------------------------------------------------- #
+# OCR-сервис (Gemini): зарубежные прокси без аренд.
+#   GET  /ocr/pool    — снапшот живых прокси с purposes ∋ 'ocr' (OCR раз в ~минуту)
+#   POST /ocr/report  — итоги за ~15 с по каждому прокси: {items:[{id, ok, fail, geo}]}
+# Назначение жёстко 'ocr' (в SQL), клиент его не выбирает. BLS-аренды и лестница не затрагиваются.
+# --------------------------------------------------------------------------- #
+class OcrItem(BaseModel):
+    id: str = Field(max_length=200)
+    ok: int = Field(default=0, ge=0, le=1_000_000)
+    fail: int = Field(default=0, ge=0, le=1_000_000)   # обрыв/таймаут/SOCKS — вина канала
+    geo: int = Field(default=0, ge=0, le=1_000_000)    # Gemini: User location is not supported
+
+
+class OcrReport(BaseModel):
+    items: list[OcrItem] = Field(default_factory=list, max_length=500)
+
+
+ocr = APIRouter(prefix="/ocr", dependencies=[Depends(require_ocr)])
+
+
+@ocr.get("/pool")
+async def ocr_pool():
+    rows = await pools["issuer"].fetch(f"select * from {SCHEMA}.ocr_get_pool()")
+    return {
+        "refresh_s": OCR_REFRESH_S,
+        "proxies": [
+            {"id": r["proxy_id"],
+             "url": _proxy_url(r["scheme"], r["host"], r["port"], r["username"], r["password"])}
+            for r in rows
+        ],
+    }
+
+
+@ocr.post("/report")
+async def ocr_report(req: OcrReport):
+    items = [it.model_dump() for it in req.items if it.ok or it.fail or it.geo]
+    applied = 0
+    if items:
+        applied = await pools["reporter"].fetchval(
+            f"select {SCHEMA}.ocr_report_batch($1::jsonb)", json.dumps(items))
+    return {"ok": True, "applied": applied}
+
+
+app.include_router(ocr)
+
+
+# --------------------------------------------------------------------------- #
 # Дашборд + админ-API
 # --------------------------------------------------------------------------- #
 def parse_proxy_line(line: str, default_scheme: str) -> dict[str, Any]:
@@ -333,6 +393,8 @@ class AddProxies(BaseModel):
     kind: str = "shared"
     pool: Optional[str] = Field(default=None, max_length=64)
     max_leases: int = Field(default=1, ge=1, le=10)
+    # None = не менять (новые получат {bls}); ['ocr'] = зарубежные для OCR; ['bls','ocr'] = оба
+    purposes: Optional[list[str]] = Field(default=None, max_length=2)
 
 
 class IdsReq(BaseModel):
@@ -374,6 +436,8 @@ async def admin_add(req: AddProxies):
         raise HTTPException(400, "bad scheme")
     if req.kind not in ALLOWED_KINDS:
         raise HTTPException(400, "bad kind")
+    if req.purposes is not None and (not req.purposes or any(x not in ALLOWED_PURPOSES for x in req.purposes)):
+        raise HTTPException(400, "bad purposes")
     items: list[dict[str, Any]] = []
     errors: list[str] = []
     for n, raw in enumerate(req.text.splitlines(), 1):
@@ -383,6 +447,8 @@ async def admin_add(req: AddProxies):
         try:
             item = parse_proxy_line(line, req.scheme)
             item.update(kind=req.kind, pool=req.pool, max_leases=req.max_leases)
+            if req.purposes is not None:
+                item["purposes"] = sorted(set(req.purposes))
             items.append(item)
         except ValueError as exc:
             errors.append(f"строка {n}: {exc}")
