@@ -27,6 +27,12 @@ button{cursor:pointer}button.p{background:var(--acc);border-color:var(--acc);col
 
 <h2>Пулы</h2>
 <div class="sc"><table id="sum"></table></div>
+<div id="legend" class="off" style="margin-top:6px"></div>
+
+<h2>Настройки ступеней</h2>
+<div id="cfg" class="row"></div>
+<div class="row"><button id="resetrun">Сбросить ступени (как рестарт пула)</button>
+<span class="off">вернёт «авто-выкл» прокси в работу и обнулит счётчики карантинов за запуск</span></div>
 
 <h2>Добавить прокси</h2>
 <textarea id="ta" placeholder="По одному в строке:&#10;host:port:user:pass&#10;user:pass@host:port&#10;socks5://user:pass@host:port&#10;host:port"></textarea>
@@ -60,34 +66,61 @@ button{cursor:pointer}button.p{background:var(--acc);border-color:var(--acc);col
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const tm=x=>x?new Date(x).toLocaleTimeString('ru-RU'):'—';
-let S={summary:[],proxies:[],leases:[],events:[]};const sel=new Set();
+let S={summary:[],proxies:[],leases:[],events:[],settings:[]};const sel=new Set();
 
 async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
   if(!r.ok)throw new Error(r.status+' '+(await r.text()).slice(0,300));
   return r.json();
 }
+const left=x=>{const m=Math.max(1,Math.ceil((new Date(x)-Date.now())/60000));return m>=60?Math.floor(m/60)+'ч '+(m%60)+'м':m+' мин'};
+const isBls=p=>(p.purposes||[]).includes('bls');
 function status(p){
-  if(!p.enabled)return['off','выкл'];
-  if(p.quarantined_until&&new Date(p.quarantined_until)>Date.now())return['bad','карантин до '+tm(p.quarantined_until)];
+  if(!p.enabled)return['off',p.auto_disabled?'выкл (авто)':'выкл'];
+  if(p.quarantined_until&&new Date(p.quarantined_until)>Date.now())return['bad','карантин ещё '+left(p.quarantined_until)+' (до '+tm(p.quarantined_until)+')'];
   if(p.active_leases>=p.max_leases)return['warn','занят'];
-  if(p.free_at&&new Date(p.free_at)>Date.now())return['warn','кулдаун до '+tm(p.free_at)];
+  if(p.free_at&&new Date(p.free_at)>Date.now())return['warn','кулдаун ещё '+left(p.free_at)+' (до '+tm(p.free_at)+')'];
   return['ok','свободен'];
 }
+function why(p){
+  const st=status(p)[1];
+  if(!p.enabled&&p.auto_disabled)return p.disabled_reason||'';
+  if(st.startsWith('карантин'))return p.quarantine_reason||'';
+  if(st.startsWith('кулдаун'))return p.cooldown_reason||'';
+  return '';
+}
+const VERD={proxy_dead:'BLS не открыл — прокси мёртв',site_down:'BLS лежит — прощён',transient:'TCP до BLS ок — прощён'};
+const CFG={cooldown_ok_s:'кулдаун после нормального release, сек',cooldown_proxy_fault_s:'1-й сбой прокси: кулдаун, сек',
+ fault_quarantine_min:'2-й сбой: карантин, мин',repeat_fault_count:'сбой №… в окне → карантин',
+ repeat_fault_window_min:'окно подсчёта сбоев, мин',fault_disable_after_quarantines:'карантин №… за запуск → выключить',
+ fault_soft_cooldown_s:'кулдаун после «прощения», сек',site_check_enabled:'проверять TCP до BLS после сбоя (1/0)'};
+const CV=()=>Object.fromEntries((S.settings||[]).map(r=>[r.key,r.value]));
+let cfgShown=false;
+function renderCfg(){
+  $('#cfg').innerHTML=Object.entries(CFG).map(([k,t])=>`<label>${esc(t)} <input data-k="${k}" type="number" min="0" style="width:80px" value="${esc(CV()[k]??'')}"></label>`).join('');
+  cfgShown=true;
+}
+$('#cfg').addEventListener('change',e=>{const k=e.target.dataset.k;if(!k)return;
+  run(async()=>{await api('/admin/api/settings',{key:k,value:+e.target.value});$('#msg').textContent='сохранено: '+CFG[k]+' = '+e.target.value})});
+$('#resetrun').onclick=()=>run(async()=>{const r=await api('/admin/api/reset-run',{});$('#msg').textContent='возвращено в работу: '+r.re_enabled});
 function render(){
   const q=$('#q').value.toLowerCase();
   const free=S.proxies.filter(p=>status(p)[0]==='ok').length;
-  $('#tot').textContent=`всего ${S.proxies.length} · свободно ${free} · аренд ${S.leases.length}`;
+  const bls=S.proxies.filter(isBls),blsFree=bls.filter(p=>status(p)[0]==='ok').length;
+  $('#tot').innerHTML=`всего ${S.proxies.length} · свободно (все цели) ${free} · <b>доступно для bls ${blsFree} из ${bls.length}</b> · аренд ${S.leases.length}`;
+  const c=CV();
+  $('#legend').textContent=`Ступени: 1-й сбой — кулдаун ${c.cooldown_proxy_fault_s??'?'} с · сбой №${c.repeat_fault_count??'?'} в окне ${c.repeat_fault_window_min??'?'} мин — карантин ${c.fault_quarantine_min??'?'} мин · карантин №${c.fault_disable_after_quarantines??'?'} за запуск — выключено до рестарта пула · после обычного release кулдаун ${c.cooldown_ok_s??'?'} с · проверка TCP до BLS: ${c.site_check_enabled==='1'?'вкл':'выкл'}. «кулдаун» в таблице пулов = прокси, которые сейчас отдыхают.`;
+  if(!cfgShown&&(S.settings||[]).length)renderCfg();
   $('#sum').innerHTML='<tr><th>тип</th><th>пул</th><th>вкл</th><th>свободно</th><th>кулдаун</th><th>занято</th><th>карантин</th></tr>'+
     S.summary.map(r=>`<tr><td>${esc(r.kind)}</td><td>${esc(r.pool)}</td><td>${r.enabled}</td><td class="ok">${r.available}</td><td>${r.cooling}</td><td>${r.full}</td><td class="${r.quarantined?'bad':''}">${r.quarantined}</td></tr>`).join('');
-  const rows=S.proxies.filter(p=>!q||[p.id,p.host,p.pool,p.kind,(p.accounts||[]).join(' '),status(p)[1]].join(' ').toLowerCase().includes(q));
-  $('#px').innerHTML='<tr><th><input type="checkbox" id="all"></th><th>id</th><th>адрес</th><th>пул</th><th>статус</th><th>аккаунты</th><th>ошибок</th><th>пинг мс</th><th>посл. ok</th><th>причина карантина</th></tr>'+
-    rows.map(p=>{const[c,t]=status(p);return `<tr><td><input type="checkbox" data-id="${esc(p.id)}" ${sel.has(p.id)?'checked':''}></td><td>${esc(p.id)}</td><td>${esc(p.scheme)}://${esc(p.host)}:${p.port}${p.username?'':' <span class="warn">(без логина)</span>'}</td><td>${esc(p.pool||'—')}</td><td class="${c}">${esc(t)}</td><td>${esc((p.accounts||[]).join(', ')||'—')}</td><td>${p.consecutive_failures}/${p.probe_failures}</td><td class="${p.last_probe_ok===false?'bad':''}">${p.last_latency_ms??'—'}</td><td>${tm(p.last_ok_at)}</td><td>${esc(p.quarantine_reason||'')}</td></tr>`}).join('');
+  const rows=S.proxies.filter(p=>!q||[p.id,p.host,p.pool,p.kind,(p.accounts||[]).join(' '),status(p)[1],why(p)].join(' ').toLowerCase().includes(q));
+  $('#px').innerHTML='<tr><th><input type="checkbox" id="all"></th><th>id</th><th>адрес</th><th>пул</th><th>статус</th><th>аккаунты</th><th>ошибок</th><th>пинг мс</th><th>посл. ok</th><th>ступень</th><th>причина</th><th>проверка BLS</th></tr>'+
+    rows.map(p=>{const[c,t]=status(p);return `<tr><td><input type="checkbox" data-id="${esc(p.id)}" ${sel.has(p.id)?'checked':''}></td><td>${esc(p.id)}</td><td>${esc(p.scheme)}://${esc(p.host)}:${p.port}${p.username?'':' <span class="warn">(без логина)</span>'}</td><td>${esc(p.pool||'—')}</td><td class="${c}">${esc(t)}</td><td>${esc((p.accounts||[]).join(', ')||'—')}</td><td>${p.consecutive_failures}/${p.probe_failures}</td><td class="${p.last_probe_ok===false?'bad':''}">${p.last_latency_ms??'—'}</td><td>${tm(p.last_ok_at)}</td><td>${p.fault_count||0} сбой / ${p.quarantine_runs||0} карант.</td><td>${esc(why(p))}</td><td>${esc(VERD[p.fault_verdict]||'')}</td></tr>`}).join('');
   $('#selc').textContent=sel.size?`выбрано: ${sel.size}`:'';
   $('#ls').innerHTML='<tr><th>аккаунт</th><th>прокси</th><th>цель</th><th>выдан</th><th>истекает</th></tr>'+
     S.leases.map(l=>`<tr><td>${esc(l.account_id)}</td><td>${esc(l.proxy_id)}</td><td>${esc(l.purpose)}</td><td>${tm(l.acquired_at)}</td><td>${tm(l.expires_at)}</td></tr>`).join('');
   $('#ev').innerHTML='<tr><th>время</th><th>прокси</th><th>аккаунт</th><th>событие</th><th>код</th><th>фаза</th></tr>'+
-    S.events.map(e=>`<tr><td>${tm(e.created_at)}</td><td>${esc(e.proxy_id||'')}</td><td>${esc(e.account_id||'')}</td><td class="${e.event_type==='error'||e.event_type==='quarantined'||e.event_type==='reset_requested'?'bad':e.event_type==='global_wave'?'warn':''}">${esc(e.event_type)}</td><td>${esc(e.error_code||'')}</td><td>${esc(e.phase||'')}</td></tr>`).join('');
+    S.events.map(e=>`<tr><td>${tm(e.created_at)}</td><td>${esc(e.proxy_id||'')}</td><td>${esc(e.account_id||'')}</td><td class="${e.event_type==='error'||e.event_type==='quarantined'||e.event_type==='auto_disabled'||e.event_type==='fault_confirmed'||e.event_type==='reset_requested'?'bad':e.event_type==='global_wave'||e.event_type==='fault_forgiven'?'warn':''}">${esc(e.event_type)}</td><td>${esc(e.error_code||'')}</td><td>${esc(e.phase||'')}</td></tr>`).join('');
 }
 async function refresh(){
   try{S=await api('/admin/api/state');$('#err').textContent='';render();}
