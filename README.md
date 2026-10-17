@@ -19,3 +19,11 @@
 4. Дашборд: https://bls-proxy.shikinn.com/
 
 Обновление: `git push` в ветку — сервер подтянет сам в течение минуты.
+
+## Битые прокси (SOCKS/connect)
+Клиент шлёт `error_code=PROXY_CONNECT_FAILED`, когда Chrome видит `ERR_SOCKS_CONNECTION_FAILED`
+или relay признаёт маршрут мёртвым. Сервер:
+- кулдаун `cooldown_proxy_fault_s` (1 час): прокси не выдаётся никому;
+- второй такой сбой за `repeat_fault_window_min` (180 мин) от любых аккаунтов — карантин 60 -> 120 -> 240 мин.
+
+Для уже работающей базы накатить `sql/04_proxy_fault.sql` в Supabase SQL Editor (перезапуск сервиса не нужен).

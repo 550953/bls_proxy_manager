@@ -177,7 +177,13 @@ insert into settings(key, value, note) values
  ('quarantine_base_min',      '5',    'база карантина, удваивается по уровню'),
  ('quarantine_max_min',       '240',  'потолок карантина'),
  ('probe_interval_min',       '5',    'как часто пинговать один прокси'),
- ('events_retention_days',    '14',   'хранение proxy_events')
+ ('events_retention_days',    '14',   'хранение proxy_events'),
+ ('proxy_fault_codes',        '["PROXY_CONNECT_FAILED","PROXY_TIMEOUT","ERR_PROXY_CONNECTION_FAILED","ERR_TUNNEL_CONNECTION_FAILED"]',
+                              'подмножество proxy_error_codes: прокси сам не пропускает трафик (долгий кулдаун; повтор -> карантин)'),
+ ('cooldown_proxy_fault_s',   '3600', 'пауза прокси после proxy_fault_codes, сек'),
+ ('repeat_fault_window_min',  '180',  'окно подсчёта повторных proxy_fault_codes на одном прокси'),
+ ('repeat_fault_count',       '2',    'столько ошибок в окне (от любых аккаунтов) -> карантин'),
+ ('repeat_fault_quarantine_min','60', 'база карантина за повтор, удваивается по уровню (60,120,240; потолок quarantine_max_min)')
 on conflict (key) do nothing;
 
 -- Нейтральные таргеты. Пинговать сам сайт BLS не стоит — лишний шанс бана IP.
@@ -208,6 +214,29 @@ begin
        set quarantined_until = now() + make_interval(mins =>
                least(cfg_int('quarantine_max_min', 240),
                      cfg_int('quarantine_base_min', 5) * power(2, least(quarantine_level, 10))::integer)),
+           quarantine_reason = p_reason,
+           quarantine_level  = quarantine_level + 1,
+           consecutive_failures = 0,
+           probe_failures = 0,
+           updated_at = now()
+     where proxy_id = p_proxy_id
+       and (quarantined_until is null or quarantined_until <= now());
+    get diagnostics v_done = row_count;
+    if v_done > 0 then
+        insert into proxy_events(proxy_id, event_type, detail)
+        values (p_proxy_id, 'quarantined', jsonb_build_object('reason', p_reason));
+    end if;
+end $$;
+
+-- Карантин с собственной базой (минуты), удваивается по quarantine_level.
+create or replace function quarantine_proxy_min(p_proxy_id text, p_reason text, p_base_min integer) returns void
+language plpgsql set search_path = bls_proxy_manager, pg_temp as $$
+declare v_done integer;
+begin
+    update proxy_state
+       set quarantined_until = now() + make_interval(mins =>
+               least(cfg_int('quarantine_max_min', 240),
+                     greatest(1, coalesce(p_base_min, 60)) * power(2, least(quarantine_level, 10))::integer)),
            quarantine_reason = p_reason,
            quarantine_level  = quarantine_level + 1,
            consecutive_failures = 0,
@@ -352,6 +381,8 @@ declare
     l      leases%rowtype;
     v_cons integer;
     v_cool integer;
+    v_fault boolean;
+    v_rep  integer;
 begin
     if p_event_type not in ('cycle_ok','error') then
         raise exception 'bad event_type %', p_event_type;
@@ -374,8 +405,12 @@ begin
          where proxy_id = l.proxy_id;
 
     elsif p_error_code = any (cfg_codes('proxy_error_codes')) then
+        -- «прокси сам не пропускает трафик» (SOCKS/connect/timeout) — долгая пауза
+        v_fault := p_error_code = any (cfg_codes('proxy_fault_codes'));
         v_cool := case when p_error_code = any (cfg_codes('ban_error_codes'))
                        then cfg_int('cooldown_ban_s', 900)
+                       when v_fault
+                       then cfg_int('cooldown_proxy_fault_s', cfg_int('cooldown_error_s', 120))
                        else cfg_int('cooldown_error_s', 120) end;
         update proxy_state
            set consecutive_failures = consecutive_failures + 1,
@@ -384,6 +419,22 @@ begin
                updated_at = now()
          where proxy_id = l.proxy_id
         returning consecutive_failures into v_cons;
+
+        -- Тот же прокси сбоил повторно за короткий срок (от любых аккаунтов) — карантин.
+        if v_fault then
+            select count(*) into v_rep
+              from proxy_events e
+             where e.proxy_id = l.proxy_id
+               and e.event_type = 'error'
+               and e.error_code = any (cfg_codes('proxy_fault_codes'))
+               and e.created_at > now() - make_interval(mins => cfg_int('repeat_fault_window_min', 180));
+            if v_rep >= cfg_int('repeat_fault_count', 2) then
+                perform quarantine_proxy_min(
+                    l.proxy_id,
+                    'repeat proxy fault x' || v_rep || ', last: ' || p_error_code,
+                    cfg_int('repeat_fault_quarantine_min', 60));
+            end if;
+        end if;
 
         if v_cons >= cfg_int('consec_fail_quarantine', 5) then
             perform quarantine_proxy(l.proxy_id, 'consecutive errors, last: ' || p_error_code);
