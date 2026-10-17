@@ -91,9 +91,10 @@ function why(p){
 }
 const VERD={proxy_dead:'BLS не открыл — прокси мёртв',site_down:'BLS лежит — прощён',transient:'TCP до BLS ок — прощён'};
 const CFG={cooldown_ok_s:'кулдаун после нормального release, сек',cooldown_proxy_fault_s:'1-й сбой прокси: кулдаун, сек',
- fault_quarantine_min:'2-й сбой: карантин, мин',repeat_fault_count:'сбой №… в окне → карантин',
- repeat_fault_window_min:'окно подсчёта сбоев, мин',fault_disable_after_quarantines:'карантин №… за запуск → выключить',
- fault_soft_cooldown_s:'кулдаун после «прощения», сек',site_check_enabled:'проверять TCP до BLS после сбоя (1/0)'};
+ fault_cooldown2_s:'2-й сбой прокси: кулдаун, сек',fault_disable_count:'сбой №… в окне → выключить до сброса',
+ repeat_fault_window_min:'окно подсчёта сбоев, мин',
+ fault_soft_cooldown_s:'кулдаун после «прощения», сек',site_check_enabled:'проверять TCP до BLS после сбоя (1/0)',
+ site_check_attempts:'попыток TCP до BLS на ступенях 2–3'};
 const CV=()=>Object.fromEntries((S.settings||[]).map(r=>[r.key,r.value]));
 let cfgShown=false;
 function renderCfg(){
@@ -109,13 +110,13 @@ function render(){
   const bls=S.proxies.filter(isBls),blsFree=bls.filter(p=>status(p)[0]==='ok').length;
   $('#tot').innerHTML=`всего ${S.proxies.length} · свободно (все цели) ${free} · <b>доступно для bls ${blsFree} из ${bls.length}</b> · аренд ${S.leases.length}`;
   const c=CV();
-  $('#legend').textContent=`Ступени: 1-й сбой — кулдаун ${c.cooldown_proxy_fault_s??'?'} с · сбой №${c.repeat_fault_count??'?'} в окне ${c.repeat_fault_window_min??'?'} мин — карантин ${c.fault_quarantine_min??'?'} мин · карантин №${c.fault_disable_after_quarantines??'?'} за запуск — выключено до рестарта пула · после обычного release кулдаун ${c.cooldown_ok_s??'?'} с · проверка TCP до BLS: ${c.site_check_enabled==='1'?'вкл':'выкл'}. «кулдаун» в таблице пулов = прокси, которые сейчас отдыхают.`;
+  $('#legend').textContent=`Ступени: 1-й сбой — кулдаун ${c.cooldown_proxy_fault_s??'?'} с · 2-й сбой — кулдаун ${c.fault_cooldown2_s??'?'} с · сбой №${c.fault_disable_count??'?'} в окне ${c.repeat_fault_window_min??'?'} мин — выключено до сброса ступеней · после обычного release кулдаун ${c.cooldown_ok_s??'?'} с · проверка TCP до BLS: ${c.site_check_enabled==='1'?'вкл':'выкл'}, на ступенях 2–3 до ${c.site_check_attempts??'?'} попыток. «кулдаун» в таблице пулов = прокси, которые сейчас отдыхают.`;
   if(!cfgShown&&(S.settings||[]).length)renderCfg();
   $('#sum').innerHTML='<tr><th>тип</th><th>пул</th><th>вкл</th><th>свободно</th><th>кулдаун</th><th>занято</th><th>карантин</th></tr>'+
     S.summary.map(r=>`<tr><td>${esc(r.kind)}</td><td>${esc(r.pool)}</td><td>${r.enabled}</td><td class="ok">${r.available}</td><td>${r.cooling}</td><td>${r.full}</td><td class="${r.quarantined?'bad':''}">${r.quarantined}</td></tr>`).join('');
   const rows=S.proxies.filter(p=>!q||[p.id,p.host,p.pool,p.kind,(p.accounts||[]).join(' '),status(p)[1],why(p)].join(' ').toLowerCase().includes(q));
   $('#px').innerHTML='<tr><th><input type="checkbox" id="all"></th><th>id</th><th>адрес</th><th>пул</th><th>статус</th><th>аккаунты</th><th>ошибок</th><th>пинг мс</th><th>посл. ok</th><th>ступень</th><th>причина</th><th>проверка BLS</th></tr>'+
-    rows.map(p=>{const[c,t]=status(p);return `<tr><td><input type="checkbox" data-id="${esc(p.id)}" ${sel.has(p.id)?'checked':''}></td><td>${esc(p.id)}</td><td>${esc(p.scheme)}://${esc(p.host)}:${p.port}${p.username?'':' <span class="warn">(без логина)</span>'}</td><td>${esc(p.pool||'—')}</td><td class="${c}">${esc(t)}</td><td>${esc((p.accounts||[]).join(', ')||'—')}</td><td>${p.consecutive_failures}/${p.probe_failures}</td><td class="${p.last_probe_ok===false?'bad':''}">${p.last_latency_ms??'—'}</td><td>${tm(p.last_ok_at)}</td><td>${p.fault_count||0} сбой / ${p.quarantine_runs||0} карант.</td><td>${esc(why(p))}</td><td>${esc(VERD[p.fault_verdict]||'')}</td></tr>`}).join('');
+    rows.map(p=>{const[c,t]=status(p);return `<tr><td><input type="checkbox" data-id="${esc(p.id)}" ${sel.has(p.id)?'checked':''}></td><td>${esc(p.id)}</td><td>${esc(p.scheme)}://${esc(p.host)}:${p.port}${p.username?'':' <span class="warn">(без логина)</span>'}</td><td>${esc(p.pool||'—')}</td><td class="${c}">${esc(t)}</td><td>${esc((p.accounts||[]).join(', ')||'—')}</td><td>${p.consecutive_failures}/${p.probe_failures}</td><td class="${p.last_probe_ok===false?'bad':''}">${p.last_latency_ms??'—'}</td><td>${tm(p.last_ok_at)}</td><td>${p.fault_count||0} сбой${p.auto_disabled?' · выкл':''}</td><td>${esc(why(p))}</td><td>${esc(VERD[p.fault_verdict]||'')}</td></tr>`}).join('');
   $('#selc').textContent=sel.size?`выбрано: ${sel.size}`:'';
   $('#ls').innerHTML='<tr><th>аккаунт</th><th>прокси</th><th>цель</th><th>выдан</th><th>истекает</th></tr>'+
     S.leases.map(l=>`<tr><td>${esc(l.account_id)}</td><td>${esc(l.proxy_id)}</td><td>${esc(l.purpose)}</td><td>${tm(l.acquired_at)}</td><td>${tm(l.expires_at)}</td></tr>`).join('');

@@ -74,12 +74,13 @@ SCHEMA = "bls_proxy_manager"
 SITE_HOST = os.environ.get("BLS_SITE_HOST", "appointment.blsspainrussia.ru")
 SITE_PORT = int(os.environ.get("BLS_SITE_PORT", "443"))
 SITE_CHECK_TIMEOUT = float(os.environ.get("BLS_SITE_CHECK_TIMEOUT", "6"))
+SITE_CHECK_RETRY_DELAY = float(os.environ.get("BLS_SITE_CHECK_RETRY_DELAY", "4"))
 FAULT_CODES = frozenset({
     "PROXY_CONNECT_FAILED", "PROXY_TIMEOUT",
     "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
 })
 _verify_inflight: set[str] = set()
-_verify_sema = asyncio.Semaphore(8)
+_verify_sema = asyncio.Semaphore(16)
 DASH_FILE = Path(__file__).with_name("dashboard.html")
 
 ALLOWED_SCHEMES = ("http", "https", "socks5", "socks5h")
@@ -524,8 +525,18 @@ async def _verify_fault(proxy_id: str) -> None:
             job = await pool.fetchrow(f"select * from {SCHEMA}.fault_probe_job($1)", proxy_id)
             if not job:  # проверка выключена, сбой старый или вердикт уже есть
                 return
-            ok, why = await _tcp_via_proxy(
-                job["scheme"], job["host"], job["port"], job["username"], job["password"])
+            # ступени 2 и 3: несколько попыток с паузой, чтобы не казнить прокси за секундный сбой ДЦ
+            attempts = max(1, min(5, int(job.get("attempts") or 1)))
+            ok, why = False, ""
+            for i in range(attempts):
+                ok, why = await _tcp_via_proxy(
+                    job["scheme"], job["host"], job["port"], job["username"], job["password"])
+                if ok:
+                    break
+                if i + 1 < attempts:
+                    await asyncio.sleep(SITE_CHECK_RETRY_DELAY)
+            if attempts > 1:
+                why = f"{why} (попыток: {i + 1}/{attempts})"
             if ok:
                 verdict = "transient"
             elif not await _tcp_direct():
