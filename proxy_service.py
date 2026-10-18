@@ -430,6 +430,20 @@ async def admin_state():
     }
 
 
+@admin.get("/stats")
+async def admin_stats(hours: int = 24):
+    """Точки для графика: успешные циклы и ошибки по часам/суткам (нужен sql/09_stats.sql)."""
+    hours = max(1, min(int(hours), 336))
+    try:
+        rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_event_stats($1)", hours)
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/09_stats.sql")
+    return {
+        "hours": hours,
+        "points": [{"t": r["bucket"].isoformat(), "ok": r["ok"], "err": r["err"]} for r in rows],
+    }
+
+
 @admin.post("/proxies")
 async def admin_add(req: AddProxies):
     if req.scheme not in ALLOWED_SCHEMES:
