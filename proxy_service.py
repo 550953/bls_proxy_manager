@@ -89,7 +89,7 @@ DASH_FILE = Path(__file__).with_name("dashboard.html")
 
 ALLOWED_SCHEMES = ("http", "https", "socks5", "socks5h")
 ALLOWED_KINDS = ("shared", "dedicated", "mobile")
-ALLOWED_PURPOSES = ("bls", "ocr")
+ALLOWED_PURPOSES = ("bls", "ocr", "visaglobal")
 
 pools: dict[str, asyncpg.Pool] = {}
 _target_cache: dict[int, tuple[str, int]] = {}
@@ -394,7 +394,7 @@ class AddProxies(BaseModel):
     pool: Optional[str] = Field(default=None, max_length=64)
     max_leases: int = Field(default=1, ge=1, le=10)
     # None = не менять (новые получат {bls}); ['ocr'] = зарубежные для OCR; ['bls','ocr'] = оба
-    purposes: Optional[list[str]] = Field(default=None, max_length=2)
+    purposes: Optional[list[str]] = Field(default=None, max_length=3)
 
 
 class IdsReq(BaseModel):
@@ -413,15 +413,40 @@ async def dashboard():
     return HTMLResponse(DASH_FILE.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
 
 
+def _purpose_arg(purpose: Optional[str]) -> Optional[str]:
+    """None/'bls' -> обычный путь BLS; иначе проверенное имя цели (например, visaglobal)."""
+    if purpose is None or purpose == "" or purpose == "bls":
+        return None
+    if purpose not in ALLOWED_PURPOSES or purpose == "ocr":
+        raise HTTPException(400, "bad purpose")
+    return purpose
+
+
 @admin.get("/state")
-async def admin_state():
+async def admin_state(purpose: Optional[str] = None):
     p = pools["admin"]
+    pur = _purpose_arg(purpose)
+    if pur:
+        summary = await p.fetch(f"select * from {SCHEMA}.admin_purpose_summary($1)", pur)
+        proxies = await p.fetch(f"select * from {SCHEMA}.admin_purpose_proxies($1)", pur)
+        leases = await p.fetch(f"select * from {SCHEMA}.admin_purpose_leases($1)", pur)
+        events = await p.fetch(f"select * from {SCHEMA}.admin_purpose_events($1, $2)", pur, 100)
+        settings = await p.fetch(f"select * from {SCHEMA}.admin_purpose_get_settings($1)", pur)
+        return {
+            "purpose": pur,
+            "settings": [dict(r) for r in settings],
+            "summary": [dict(r) for r in summary],
+            "proxies": [dict(r) for r in proxies],
+            "leases": [dict(r) for r in leases],
+            "events": [dict(r) for r in events],
+        }
     summary = await p.fetch(f"select * from {SCHEMA}.v_pool_summary order by 1, 2")
     proxies = await p.fetch(f"select * from {SCHEMA}.admin_list_proxies()")
     leases = await p.fetch(f"select * from {SCHEMA}.admin_active_leases()")
     events = await p.fetch(f"select * from {SCHEMA}.admin_recent_events($1)", 100)
     settings = await p.fetch(f"select * from {SCHEMA}.admin_get_settings()")
     return {
+        "purpose": "bls",
         "settings": [dict(r) for r in settings],
         "summary": [dict(r) for r in summary],
         "proxies": [dict(r) for r in proxies],
@@ -431,11 +456,16 @@ async def admin_state():
 
 
 @admin.get("/stats")
-async def admin_stats(hours: int = 24):
+async def admin_stats(hours: int = 24, purpose: Optional[str] = None):
     """Точки для графика: успешные циклы и ошибки по часам/суткам (нужен sql/09_stats.sql)."""
     hours = max(1, min(int(hours), 336))
+    pur = _purpose_arg(purpose)
     try:
-        rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_event_stats($1)", hours)
+        if pur:
+            rows = await pools["admin"].fetch(
+                f"select * from {SCHEMA}.admin_purpose_event_stats($1, $2)", pur, hours)
+        else:
+            rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_event_stats($1)", hours)
     except asyncpg.UndefinedFunctionError:
         raise HTTPException(501, "накатите sql/09_stats.sql")
     return {
@@ -488,29 +518,52 @@ async def admin_delete(req: IdsReq):
     return {"deleted": n}
 
 
+class UnqReq(IdsReq):
+    purpose: Optional[str] = None
+
+
 @admin.post("/proxies/unquarantine")
-async def admin_unquarantine(req: IdsReq):
-    n = await pools["admin"].fetchval(f"select {SCHEMA}.admin_clear_quarantine($1::text[])", req.ids)
+async def admin_unquarantine(req: UnqReq):
+    pur = _purpose_arg(req.purpose)
+    if pur:
+        n = await pools["admin"].fetchval(
+            f"select {SCHEMA}.admin_purpose_clear_quarantine($1, $2::text[])", pur, req.ids)
+    else:
+        n = await pools["admin"].fetchval(f"select {SCHEMA}.admin_clear_quarantine($1::text[])", req.ids)
     return {"changed": n}
 
 
 class SettingReq(BaseModel):
     key: str
     value: int = Field(ge=0, le=999999)
+    purpose: Optional[str] = None
 
 
 @admin.post("/settings")
 async def admin_setting(req: SettingReq):
+    pur = _purpose_arg(req.purpose)
     try:
-        await pools["admin"].execute(
-            f"select {SCHEMA}.admin_set_setting($1, $2)", req.key, str(req.value))
+        if pur:
+            await pools["admin"].execute(
+                f"select {SCHEMA}.admin_purpose_set_setting($1, $2, $3)", pur, req.key, str(req.value))
+        else:
+            await pools["admin"].execute(
+                f"select {SCHEMA}.admin_set_setting($1, $2)", req.key, str(req.value))
     except asyncpg.PostgresError as exc:
         raise HTTPException(400, str(exc)[:200])
     return {"ok": True}
 
 
+class PurposeReq(BaseModel):
+    purpose: Optional[str] = None
+
+
 @admin.post("/reset-run")
-async def admin_reset_run():
+async def admin_reset_run(req: Optional[PurposeReq] = None):
+    pur = _purpose_arg(req.purpose if req else None)
+    if pur:
+        n = await pools["admin"].fetchval(f"select {SCHEMA}.admin_purpose_reset($1)", pur)
+        return {"re_enabled": n}
     n = await pools["admin"].fetchval(f"select {SCHEMA}.admin_reset_run()")
     return {"re_enabled": n}
 

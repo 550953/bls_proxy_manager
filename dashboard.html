@@ -68,6 +68,7 @@ td.num,th.num{text-align:right}
 .bdg{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:700;letter-spacing:.02em;margin-right:4px}
 .b-bls{background:var(--blsbg);color:var(--bls)}
 .b-ocr{background:var(--ocrbg);color:var(--ocr)}
+.b-vfs{background:#fde8f3;color:#a3236a}
 .b-sch{background:var(--ln2);color:var(--fg);font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:600;border:1px solid var(--ln)}
 .st{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600}
 .st.ok{background:var(--okbg);color:var(--ok)}.st.bad{background:var(--badbg);color:var(--bad)}
@@ -159,6 +160,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
   <div>
     <h1>Proxy Manager <span class="live" id="live">работает</span></h1>
     <div class="sub">Управление, проверка и мониторинг прокси</div>
+    <div class="seg" id="pseg" style="margin:8px 0 0"><button data-p="bls" class="on">BLS</button><button data-p="visaglobal">VisaGlobal</button></div>
   </div>
   <div class="upd" id="upd">—</div>
 </header>
@@ -177,7 +179,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
       <select id="scheme" title="протокол"><option>socks5</option><option>http</option><option>https</option><option>socks5h</option></select>
       <select id="kind" title="тип"><option>shared</option><option>dedicated</option><option>mobile</option></select>
       <input id="pool" placeholder="пул (необязательно)" size="18">
-      <select id="purp" title="для кого прокси: bls = кликер (RU), ocr = Gemini (зарубежные)"><option value="bls">назначение: bls</option><option value="ocr">назначение: ocr</option><option value="bls,ocr">назначение: bls+ocr</option></select>
+      <select id="purp" title="для кого прокси: bls = кликер (RU), ocr = Gemini (зарубежные)"><option value="bls">назначение: bls</option><option value="ocr">назначение: ocr</option><option value="bls,ocr">назначение: bls+ocr</option><option value="visaglobal">назначение: visaglobal</option><option value="bls,visaglobal">назначение: bls+visaglobal</option></select>
       <label>одновременно аренд <input id="ml" type="number" min="1" max="10" value="1" style="width:64px"></label>
       <button class="p" id="add-btn">Добавить / обновить</button>
     </div>
@@ -240,6 +242,12 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const tm=x=>x?new Date(x).toLocaleTimeString('ru-RU'):'—';
 let S={summary:[],proxies:[],leases:[],events:[],settings:[]};const sel=new Set();
+// ---------- цель (BLS / VisaGlobal): у каждой свои кулдауны, карантины и настройки ----------
+const PNAME={bls:'BLS',visaglobal:'VisaGlobal'};
+let PUR='bls';try{const v=localStorage.getItem('blsPurpose');if(PNAME[v])PUR=v}catch(e){}
+const isBlsMode=()=>PUR==='bls';
+const pq=()=>isBlsMode()?'':'?purpose='+PUR;
+const pj=o=>isBlsMode()?o:{...o,purpose:PUR};
 
 async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
@@ -272,18 +280,24 @@ const CFG={cooldown_ok_s:'кулдаун после нормального relea
  ocr_cooldown_s:'OCR: 1-й сбой канала, кулдаун, сек (далее ×2)',ocr_cooldown_max_s:'OCR: потолок кулдауна, сек',
  ocr_fail_quarantine:'OCR: сбоев подряд → карантин',ocr_geo_quarantine_min:'OCR: карантин за гео-отказ Gemini, мин',
  ocr_fault_debounce_s:'OCR: сбои чаще N сек = один'};
+const CFGV={cooldown_ok_s:'кулдаун после нормального release, сек',cooldown_ban_s:'кулдаун после 403/429, сек',
+ cooldown_error_s:'кулдаун после прочих ошибок прокси, сек',consec_fail_quarantine:'ошибок подряд → карантин',
+ quarantine_min:'карантин за ошибки подряд, мин',cooldown_proxy_fault_s:'1-й сбой прокси: кулдаун, сек',
+ fault_cooldown2_s:'2-й сбой прокси: кулдаун, сек',fault_disable_count:'сбой №… в окне → карантин',
+ fault_quarantine_min:'карантин после последней ступени, мин',repeat_fault_window_min:'окно подсчёта сбоев, мин'};
+const CFGX=()=>isBlsMode()?CFG:CFGV;
 const CV=()=>Object.fromEntries((S.settings||[]).map(r=>[r.key,r.value]));
 let cfgShown=false;
 function renderCfg(){
-  $('#cfg').innerHTML=Object.entries(CFG).map(([k,t])=>`<label><span>${esc(t)}</span> <input data-k="${k}" type="number" min="0" style="width:90px" value="${esc(CV()[k]??'')}"></label>`).join('');
+  $('#cfg').innerHTML=Object.entries(CFGX()).map(([k,t])=>`<label><span>${esc(t)}</span> <input data-k="${k}" type="number" min="0" style="width:90px" value="${esc(CV()[k]??'')}"></label>`).join('');
   cfgShown=true;
 }
 $('#cfg').addEventListener('change',e=>{const k=e.target.dataset.k;if(!k)return;
-  run(async()=>{await api('/admin/api/settings',{key:k,value:+e.target.value});$('#msg').textContent='сохранено: '+CFG[k]+' = '+e.target.value})});
-$('#resetrun').onclick=()=>run(async()=>{const r=await api('/admin/api/reset-run',{});$('#msg').textContent='возвращено в работу: '+r.re_enabled});
+  run(async()=>{await api('/admin/api/settings',pj({key:k,value:+e.target.value}));$('#msg').textContent='сохранено: '+CFGX()[k]+' = '+e.target.value})});
+$('#resetrun').onclick=()=>run(async()=>{const r=await api('/admin/api/reset-run',pj({}));$('#msg').textContent='возвращено в работу: '+r.re_enabled});
 
-const PORD=['bls','ocr'];
-const pBadge=x=>`<span class="bdg b-${x==='ocr'?'ocr':'bls'}">${esc(String(x).toUpperCase())}</span>`;
+const PORD=['bls','visaglobal','ocr'];
+const pBadge=x=>`<span class="bdg b-${x==='ocr'?'ocr':x==='visaglobal'?'vfs':'bls'}">${esc(String(x).toUpperCase())}</span>`;
 const sBadge=x=>`<span class="bdg b-sch">${esc(x)}</span>`;
 const purList=a=>[...a].sort((x,y)=>(PORD.indexOf(x)<0?9:PORD.indexOf(x))-(PORD.indexOf(y)<0?9:PORD.indexOf(y)));
 const zc=n=>n?'':'z';
@@ -295,14 +309,20 @@ function render(){
   const free=S.proxies.filter(p=>status(p)[0]==='ok').length;
   const bls=S.proxies.filter(isBls),blsFree=bls.filter(p=>status(p)[0]==='ok').length;
   const ocr=S.proxies.filter(isOcr),ocrFree=ocr.filter(p=>status(p)[0]==='ok').length;
-  $('#stats').innerHTML=
+  const cool=S.proxies.filter(p=>['warn','bad'].includes(status(p)[0])&&status(p)[1]!=='занят').length;
+  $('#stats').innerHTML=isBlsMode()?
     stat('','🌐','Всего прокси',S.proxies.length)+
     stat('g','✅','Свободно (все цели)',free,'из '+S.proxies.length)+
     stat('','🎯','Доступно для BLS',blsFree,'из '+bls.length)+
     stat('v','🔎','Доступно для OCR',ocrFree,'из '+ocr.length)+
-    stat('w','⇄','Активных аренд',S.leases.length);
+    stat('w','⇄','Активных аренд',S.leases.length):
+    stat('','🌐','Прокси цели '+PNAME[PUR],S.proxies.length)+
+    stat('g','✅','Свободно для '+PNAME[PUR],free,'из '+S.proxies.length)+
+    stat('v','⏳','Отдыхают / карантин',cool)+
+    stat('w','⇄','Аренд '+PNAME[PUR],S.leases.length);
   const c=CV();
-  $('#legend').textContent=`Ступени: 1-й сбой — кулдаун ${c.cooldown_proxy_fault_s??'?'} с · 2-й сбой — кулдаун ${c.fault_cooldown2_s??'?'} с · сбой №${c.fault_disable_count??'?'} в окне ${c.repeat_fault_window_min??'?'} мин — выключено до сброса ступеней · после обычного release кулдаун ${c.cooldown_ok_s??'?'} с · проверка TCP до BLS: ${c.site_check_enabled==='1'?'вкл':'выкл'}, на ступенях 2–3 до ${c.site_check_attempts??'?'} попыток. «кулдаун» в таблице пулов = прокси, которые сейчас отдыхают.`;
+  if(!isBlsMode()){$('#legend').textContent=`Цель ${PNAME[PUR]}: 1-й сбой прокси — кулдаун ${c.cooldown_proxy_fault_s??'?'} с · 2-й — ${c.fault_cooldown2_s??'?'} с · сбой №${c.fault_disable_count??'?'} в окне ${c.repeat_fault_window_min??'?'} мин — карантин ${c.fault_quarantine_min??'?'} мин · после release кулдаун ${c.cooldown_ok_s??'?'} с · 403/429 — кулдаун ${c.cooldown_ban_s??'?'} с, ${c.consec_fail_quarantine??'?'} ошибок подряд → карантин ${c.quarantine_min??'?'} мин. Кулдауны других целей на ${PNAME[PUR]} не влияют.`}
+  else $('#legend').textContent=`Ступени: 1-й сбой — кулдаун ${c.cooldown_proxy_fault_s??'?'} с · 2-й сбой — кулдаун ${c.fault_cooldown2_s??'?'} с · сбой №${c.fault_disable_count??'?'} в окне ${c.repeat_fault_window_min??'?'} мин — выключено до сброса ступеней · после обычного release кулдаун ${c.cooldown_ok_s??'?'} с · проверка TCP до BLS: ${c.site_check_enabled==='1'?'вкл':'выкл'}, на ступенях 2–3 до ${c.site_check_attempts??'?'} попыток. «кулдаун» в таблице пулов = прокси, которые сейчас отдыхают.`;
   if(!cfgShown&&(S.settings||[]).length)renderCfg();
 
   // протокол и назначение пула — из самих прокси (то, что указано при добавлении)
@@ -334,7 +354,7 @@ function render(){
     S.events.map(e=>`<tr><td>${tm(e.created_at)}</td><td>${esc(e.proxy_id||'')}</td><td>${esc(e.account_id||'')}</td><td class="${evc(e.event_type)}">${esc(e.event_type)}</td><td>${esc(e.error_code||'')}</td><td>${esc(e.phase||'')}</td></tr>`).join('')+'</tbody>';
 }
 async function refresh(){
-  try{S=await api('/admin/api/state');$('#err').textContent='';$('#live').className='live';$('#live').textContent='работает';
+  try{S=await api('/admin/api/state'+pq());if(!isBlsMode()&&S.purpose!==PUR)throw new Error('сервер ещё не поддерживает цели — обновите proxy_service.py');$('#err').textContent='';$('#live').className='live';$('#live').textContent='работает';
     $('#upd').innerHTML='Обновлено '+new Date().toLocaleTimeString('ru-RU')+' · каждые 10 с';render();}
   catch(e){$('#err').textContent='Ошибка: '+e.message;$('#live').className='live bad';$('#live').textContent='нет связи'}
 }
@@ -350,7 +370,7 @@ document.querySelectorAll('button[data-a]').forEach(b=>b.onclick=()=>{
   if(!ids.length)return alert('ничего не выбрано');
   if(k==='delete'&&!confirm('Удалить '+ids.length+' прокси? Действие необратимо.'))return;
   const m={on:['enable',{enabled:true}],off:['enable',{enabled:false}],delete:['delete',{}],unq:['unquarantine',{}]}[k];
-  run(async()=>{await api('/admin/api/proxies/'+m[0],{ids,...m[1]});if(k==='delete')sel.clear()});
+  run(async()=>{await api('/admin/api/proxies/'+m[0],k==='unq'?pj({ids,...m[1]}):{ids,...m[1]});if(k==='delete')sel.clear()});
 });
 $('#px').addEventListener('change',e=>{
   const t=e.target;
@@ -399,11 +419,22 @@ function drawChart(d){
     <path class="la" d="${line('ok')}"/><path class="le" d="${line('err')}"/>${hv}</svg>`;
 }
 async function loadStats(){
-  try{statLast=await api('/admin/api/stats?hours='+statH);drawChart(statLast)}
+  try{statLast=await api('/admin/api/stats?hours='+statH+(isBlsMode()?'':'&purpose='+PUR));drawChart(statLast)}
   catch(e){const m=String(e.message);$('#chips').innerHTML='';
     $('#chart').innerHTML='<div class="cmsg">'+(m.startsWith('501')||m.startsWith('404')?'График появится после установки <code>sql/09_stats.sql</code> в Supabase и обновления сервиса.':'Не удалось загрузить статистику: '+esc(m.slice(0,160)))+'</div>'}
 }
 $('#seg').addEventListener('click',e=>{const h=e.target.dataset.h;if(!h)return;statH=+h;
   document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats()});
+function applyPurposeUi(){
+  document.querySelectorAll('#pseg button').forEach(b=>b.classList.toggle('on',b.dataset.p===PUR));
+  $('#steps h2').textContent=isBlsMode()?'Настройки ступеней':'Настройки ступеней · '+PNAME[PUR];
+  $('#resetrun').textContent=isBlsMode()?'Сбросить ступени (как рестарт пула)':'Сбросить кулдауны и карантины '+PNAME[PUR];
+  document.title='Proxy Manager'+(isBlsMode()?'':' · '+PNAME[PUR]);
+}
+$('#pseg').addEventListener('click',e=>{const p=e.target.dataset.p;if(!p||p===PUR)return;
+  PUR=p;try{localStorage.setItem('blsPurpose',p)}catch(x){}
+  sel.clear();cfgShown=false;S={summary:[],proxies:[],leases:[],events:[],settings:[]};
+  applyPurposeUi();refresh();loadStats()});
+applyPurposeUi();
 refresh();loadStats();setInterval(refresh,10000);setInterval(loadStats,60000);
 </script></body></html>
