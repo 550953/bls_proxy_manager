@@ -114,11 +114,22 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 #chart svg{width:100%;height:auto;display:block}
 #chart .gl{stroke:var(--ln);stroke-width:1}
 #chart .ax{fill:var(--mut);font-size:11px}
-#chart .la{fill:none;stroke:var(--ok);stroke-width:2.2;stroke-linejoin:round}
+#chart .la{fill:none;stroke:var(--ok);stroke-width:1.8;stroke-linejoin:round}
 #chart .ar{fill:var(--okbg)}
-#chart .le{fill:none;stroke:var(--bad);stroke-width:2.2;stroke-linejoin:round}
+#chart .le{fill:none;stroke:var(--bad);stroke-width:1.8;stroke-linejoin:round}
 #chart .hv{fill:transparent}#chart .hv:hover{fill:var(--accbg);opacity:.6}
-.cmsg{color:var(--mut);padding:26px 0;text-align:center}
+.cmsg{color:var(--mut);padding:30px 8px;text-align:center;font-size:13px}
+
+.duo{display:grid;grid-template-columns:minmax(360px,5fr) 7fr;gap:18px;margin-bottom:18px;align-items:stretch}
+.duo>.card{margin-bottom:0;display:flex;flex-direction:column;min-width:0}
+.duo>.card>.bd{flex:1}
+.duo textarea{height:92px}
+#stat .bd{display:flex;align-items:center;padding:8px 14px 12px}
+#stat #chart{width:100%}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chips .chip{padding:3px 10px;border-radius:999px;font-size:12px;gap:6px}
+.chips .chip b{font-size:14px}
+@media(max-width:1100px){.duo{grid-template-columns:1fr}}
 @media(max-width:900px){
   .app,.app.collapsed{grid-template-columns:56px 1fr}
   aside{padding:14px 8px}
@@ -155,15 +166,31 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 
 <div class="stats" id="stats"></div>
 
-<section class="card" id="stat">
-  <div class="hd"><h2>Статистика</h2>
-    <div class="seg" id="seg"><button data-h="24" class="on">24 ч</button><button data-h="168">7 дней</button></div>
-  </div>
+
+
+<div class="duo">
+<section class="card" id="add">
+  <div class="hd"><h2>Добавить прокси</h2></div>
   <div class="bd">
-    <div class="row" style="margin-top:0" id="chips"></div>
-    <div id="chart"><div class="cmsg">загрузка…</div></div>
+    <textarea id="ta" placeholder="По одному в строке:&#10;host:port:user:pass&#10;user:pass@host:port&#10;socks5://user:pass@host:port&#10;host:port"></textarea>
+    <div class="row">
+      <select id="scheme" title="протокол"><option>socks5</option><option>http</option><option>https</option><option>socks5h</option></select>
+      <select id="kind" title="тип"><option>shared</option><option>dedicated</option><option>mobile</option></select>
+      <input id="pool" placeholder="пул (необязательно)" size="18">
+      <select id="purp" title="для кого прокси: bls = кликер (RU), ocr = Gemini (зарубежные)"><option value="bls">назначение: bls</option><option value="ocr">назначение: ocr</option><option value="bls,ocr">назначение: bls+ocr</option></select>
+      <label>одновременно аренд <input id="ml" type="number" min="1" max="10" value="1" style="width:64px"></label>
+      <button class="p" id="add-btn">Добавить / обновить</button>
+    </div>
+    <div id="msg"></div>
   </div>
 </section>
+<section class="card" id="stat">
+  <div class="hd"><h2>Статистика</h2><div class="chips" id="chips"></div>
+    <div class="seg" id="seg"><button data-h="24" class="on">24 ч</button><button data-h="168">7 дней</button></div>
+  </div>
+  <div class="bd"><div id="chart"><div class="cmsg">загрузка…</div></div></div>
+</section>
+</div>
 
 <section class="card" id="pools">
   <div class="hd"><h2>Пулы</h2><span class="cnt" id="poolcnt">0</span></div>
@@ -180,21 +207,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
   </div>
 </section>
 
-<section class="card" id="add">
-  <div class="hd"><h2>Добавить прокси</h2></div>
-  <div class="bd">
-    <textarea id="ta" placeholder="По одному в строке:&#10;host:port:user:pass&#10;user:pass@host:port&#10;socks5://user:pass@host:port&#10;host:port"></textarea>
-    <div class="row">
-      <select id="scheme" title="протокол"><option>socks5</option><option>http</option><option>https</option><option>socks5h</option></select>
-      <select id="kind" title="тип"><option>shared</option><option>dedicated</option><option>mobile</option></select>
-      <input id="pool" placeholder="пул (необязательно)" size="18">
-      <select id="purp" title="для кого прокси: bls = кликер (RU), ocr = Gemini (зарубежные)"><option value="bls">назначение: bls</option><option value="ocr">назначение: ocr</option><option value="bls,ocr">назначение: bls+ocr</option></select>
-      <label>одновременно аренд <input id="ml" type="number" min="1" max="10" value="1" style="width:64px"></label>
-      <button class="p" id="add-btn">Добавить / обновить</button>
-    </div>
-    <div id="msg"></div>
-  </div>
-</section>
+
 
 <section class="card" id="proxies">
   <div class="hd"><h2>Прокси</h2><span class="cnt" id="pxcnt">0</span>
@@ -366,18 +379,18 @@ const nfmt=n=>Number(n).toLocaleString('ru-RU');
 function drawChart(d){
   const pts=d.points||[];
   const okT=pts.reduce((a,p)=>a+p.ok,0),erT=pts.reduce((a,p)=>a+p.err,0),tot=okT+erT;
-  $('#chips').innerHTML=`<span class="chip g">успешные <b>${nfmt(okT)}</b></span><span class="chip r">ошибки <b>${nfmt(erT)}</b></span><span class="chip">доля ошибок <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span><span class="hint">BLS: цикл ок / ошибка · OCR: сбои канала и гео-отказы</span>`;
+  $('#chips').innerHTML=`<span class="chip g">успешные <b>${nfmt(okT)}</b></span><span class="chip r">ошибки <b>${nfmt(erT)}</b></span><span class="chip" title="BLS: цикл ок / ошибка · OCR: сбои канала и гео-отказы">ошибок <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span>`;
   if(!pts.length||!tot){$('#chart').innerHTML='<div class="cmsg">за этот период событий пока нет</div>';return}
-  const W=900,H=240,L=44,R=12,T=14,B=28,iw=W-L-R,ih=H-T-B;
+  const W=640,H=168,L=38,R=8,T=10,B=22,iw=W-L-R,ih=H-T-B;
   const max=Math.max(1,...pts.map(p=>Math.max(p.ok,p.err)));
   const step=Math.pow(10,Math.floor(Math.log10(max))),nice=[1,2,2.5,5,10].map(m=>m*step).find(v=>v>=max)||max;
   const X=i=>L+(pts.length>1?iw*i/(pts.length-1):iw/2),Y=v=>T+ih-ih*v/nice;
   const line=k=>pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[k]).toFixed(1)).join(' ');
   const grid=[0,.25,.5,.75,1].map(f=>{const v=nice*f,y=Y(v);return `<line class="gl" x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/><text class="ax" x="${L-6}" y="${y+4}" text-anchor="end">${nfmt(Math.round(v))}</text>`}).join('');
-  const daily=d.hours>72,every=Math.max(1,Math.ceil(pts.length/8));
+  const daily=d.hours>72,every=Math.max(1,Math.ceil(pts.length/6));
   const lab=pts.map((p,i)=>{if(i%every)return'';const dt=new Date(p.t);
     const s=daily?dt.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}):dt.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
-    return `<text class="ax" x="${X(i)}" y="${H-8}" text-anchor="middle">${s}</text>`}).join('');
+    return `<text class="ax" x="${X(i)}" y="${H-6}" text-anchor="middle">${s}</text>`}).join('');
   const bw=iw/Math.max(1,pts.length-1);
   const hv=pts.map((p,i)=>{const dt=new Date(p.t);const s=daily?dt.toLocaleDateString('ru-RU'):dt.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
     return `<rect class="hv" x="${X(i)-bw/2}" y="${T}" width="${bw}" height="${ih}"><title>${s}\nуспешные: ${p.ok}\nошибки: ${p.err}</title></rect>`}).join('');
