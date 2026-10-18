@@ -111,7 +111,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 .seg button.on{background:var(--card);color:var(--acc);box-shadow:var(--shadow)}
 .chip{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:12px;background:var(--ln2);font-size:12.5px;color:var(--mut)}
 .chip b{font-size:18px;color:var(--fg)}
-.chip.g b{color:var(--ok)}.chip.r b{color:var(--bad)}
+.chip.g b{color:var(--ok)}.chip.r b{color:var(--bad)}.chip.w b{color:var(--warn)}
 #chart svg{width:100%;height:auto;display:block}
 #chart .gl{stroke:var(--ln);stroke-width:1}
 #chart .ax{fill:var(--mut);font-size:11px}
@@ -399,7 +399,8 @@ const nfmt=n=>Number(n).toLocaleString('ru-RU');
 function drawChart(d){
   const pts=d.points||[];
   const okT=pts.reduce((a,p)=>a+p.ok,0),erT=pts.reduce((a,p)=>a+p.err,0),tot=okT+erT;
-  $('#chips').innerHTML=`<span class="chip g">успешные <b>${nfmt(okT)}</b></span><span class="chip r">ошибки <b>${nfmt(erT)}</b></span><span class="chip" title="BLS: цикл ок / ошибка · OCR: сбои канала и гео-отказы">ошибок <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span>`;
+  $('#chips').innerHTML=`<span class="chip g">успешные <b>${nfmt(okT)}</b></span><span class="chip r">ошибки <b>${nfmt(erT)}</b></span><span class="chip" title="BLS: цикл ок / ошибка · OCR: сбои канала и гео-отказы">ошибок <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span>`
+    +(d.cf==null||(!d.cf&&isBlsMode())?'':`<span class="chip w" title="Зависания на Cloudflare (CF_CHALLENGE_LOOP): не ошибка прокси, в проценты и график не входят">Cloudflare <b>${nfmt(d.cf)}</b></span>`);
   if(!pts.length||!tot){$('#chart').innerHTML='<div class="cmsg">за этот период событий пока нет</div>';return}
   const W=640,H=168,L=38,R=8,T=10,B=22,iw=W-L-R,ih=H-T-B;
   const max=Math.max(1,...pts.map(p=>Math.max(p.ok,p.err)));

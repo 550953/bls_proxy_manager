@@ -86,6 +86,8 @@ SITE_HOST = os.environ.get("BLS_SITE_HOST", "appointment.blsspainrussia.ru")
 SITE_PORT = int(os.environ.get("BLS_SITE_PORT", "443"))
 SITE_CHECK_TIMEOUT = float(os.environ.get("BLS_SITE_CHECK_TIMEOUT", "6"))
 SITE_CHECK_RETRY_DELAY = float(os.environ.get("BLS_SITE_CHECK_RETRY_DELAY", "4"))
+# Cloudflare-зависание не поломка прокси: код нигде не штрафуется, только считается в статистике
+CF_CODE = "CF_CHALLENGE_LOOP"
 FAULT_CODES = frozenset({
     "PROXY_CONNECT_FAILED", "PROXY_TIMEOUT",
     "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
@@ -515,8 +517,14 @@ async def admin_stats(hours: int = 24, purpose: Optional[str] = None):
             rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_event_stats($1)", hours)
     except asyncpg.UndefinedFunctionError:
         raise HTTPException(501, "накатите sql/09_stats.sql")
+    try:  # нужен sql/17_cloudflare_stat.sql; без него просто нет чипа
+        cf = await pools["admin"].fetchval(
+            f"select {SCHEMA}.admin_purpose_code_count($1, $2, $3)", pur or "bls", CF_CODE, hours)
+    except asyncpg.UndefinedFunctionError:
+        cf = None
     return {
         "hours": hours,
+        "cf": cf,
         "points": [{"t": r["bucket"].isoformat(), "ok": r["ok"], "err": r["err"]} for r in rows],
     }
 
