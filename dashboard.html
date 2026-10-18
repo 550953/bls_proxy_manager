@@ -404,10 +404,11 @@ function drawChart(d){
   if(!pts.length||!tot){$('#chart').innerHTML='<div class="cmsg">за этот период событий пока нет</div>';return}
   const W=640,H=168,L=38,R=8,T=10,B=22,iw=W-L-R,ih=H-T-B;
   const max=Math.max(1,...pts.map(p=>Math.max(p.ok,p.err)));
-  const step=Math.pow(10,Math.floor(Math.log10(max))),nice=[1,2,2.5,5,10].map(m=>m*step).find(v=>v>=max)||max;
+  const unit=max<=5?1:(()=>{const s=Math.pow(10,Math.floor(Math.log10(max/4)));return [1,2,5,10].map(m=>m*s).find(v=>max/v<=5)})();
+  const nice=Math.ceil(max/unit)*unit;
   const X=i=>L+(pts.length>1?iw*i/(pts.length-1):iw/2),Y=v=>T+ih-ih*v/nice;
   const line=k=>pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[k]).toFixed(1)).join(' ');
-  const grid=[0,.25,.5,.75,1].map(f=>{const v=nice*f,y=Y(v);return `<line class="gl" x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/><text class="ax" x="${L-6}" y="${y+4}" text-anchor="end">${nfmt(Math.round(v))}</text>`}).join('');
+  const grid=Array.from({length:nice/unit+1},(_,i)=>i*unit).map(v=>{const y=Y(v);return `<line class="gl" x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/><text class="ax" x="${L-6}" y="${y+4}" text-anchor="end">${nfmt(v)}</text>`}).join('');
   const daily=d.hours>72,every=Math.max(1,Math.ceil(pts.length/6));
   const lab=pts.map((p,i)=>{if(i%every)return'';const dt=new Date(p.t);
     const s=daily?dt.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}):dt.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
