@@ -7,7 +7,11 @@
   bls_admin    — дашборд (/admin/api/*), только через admin_* функции
 
 Доступ:
-  * боты      — заголовок  X-Bot-Token: $BLS_BOT_TOKEN
+  * боты      — заголовок  X-Bot-Token. Токен привязан к цели (purpose):
+                  $BLS_BOT_TOKEN              -> bls
+                  $BLS_BOT_TOKEN_VISAGLOBAL   -> visaglobal   (не задан -> цель выключена)
+                токен одной цели не может брать/продлевать/закрывать аренды другой (403).
+                Отозвать цель = убрать/сменить её токен в env и перезапустить сервис.
   * OCR       — заголовок  X-Bot-Token: $BLS_BOT_TOKEN_OCR (только /ocr/pool и /ocr/report;
                 токен кликера туда не подходит и наоборот; не задан -> /ocr/* отвечает 503)
   * дашборд   — HTTP Basic: логин $BLS_DASH_USER, пароль $BLS_DASH_PASS
@@ -56,6 +60,9 @@ DASH_USER = _req("BLS_DASH_USER")      # логин дашборда
 DASH_PASS = _req("BLS_DASH_PASS")      # пароль дашборда
 BOT_TOKEN = _req("BLS_BOT_TOKEN")      # токен для ботов (X-Bot-Token)
 BOT_TOKEN_OCR = os.environ.get("BLS_BOT_TOKEN_OCR", "")  # токен OCR-сервиса; пусто -> /ocr/* выключено
+# Токены ботов по целям: BLS_BOT_TOKEN -> bls, BLS_BOT_TOKEN_<ЦЕЛЬ> -> эта цель.
+# Новая цель = добавить её в ALLOWED_PURPOSES и задать BLS_BOT_TOKEN_<ЦЕЛЬ> (ocr — отдельный API).
+BOT_TOKEN_PURPOSES = {"bls": BOT_TOKEN}
 OCR_REFRESH_S = int(os.environ.get("BLS_OCR_REFRESH_S", "60"))  # как часто OCR перечитывает пул
 
 DB_HOST = os.environ.get("BLS_DB_HOST", "")
@@ -90,6 +97,25 @@ DASH_FILE = Path(__file__).with_name("dashboard.html")
 ALLOWED_SCHEMES = ("http", "https", "socks5", "socks5h")
 ALLOWED_KINDS = ("shared", "dedicated", "mobile")
 ALLOWED_PURPOSES = ("bls", "ocr", "visaglobal")
+
+
+def _load_purpose_tokens() -> None:
+    for pur in ALLOWED_PURPOSES:
+        if pur in ("bls", "ocr"):
+            continue
+        tok = os.environ.get(f"BLS_BOT_TOKEN_{pur.upper()}", "").strip()
+        if tok:
+            BOT_TOKEN_PURPOSES[pur] = tok
+    seen: dict[str, str] = {}
+    for pur, tok in BOT_TOKEN_PURPOSES.items():
+        if tok in seen:
+            raise SystemExit(f"Токены целей '{seen[tok]}' и '{pur}' совпадают — задайте разные")
+        seen[tok] = pur
+    if BOT_TOKEN_OCR and BOT_TOKEN_OCR in seen:
+        raise SystemExit(f"BLS_BOT_TOKEN_OCR совпадает с токеном цели '{seen[BOT_TOKEN_OCR]}'")
+
+
+_load_purpose_tokens()
 
 pools: dict[str, asyncpg.Pool] = {}
 _target_cache: dict[int, tuple[str, int]] = {}
@@ -129,8 +155,7 @@ async def lifespan(app: FastAPI):
         log.info("pool run reset: re-enabled %s auto-disabled proxies", re_enabled)
     except Exception:
         log.exception("admin_reset_run failed (применён ли sql/05_fault_ladder.sql?)")
-    if BOT_TOKEN_OCR and secrets.compare_digest(BOT_TOKEN_OCR.encode(), BOT_TOKEN.encode()):
-        log.warning("BLS_BOT_TOKEN_OCR совпадает с BLS_BOT_TOKEN: токены лучше разделить")
+    log.info("bot tokens active for purposes: %s", ", ".join(sorted(BOT_TOKEN_PURPOSES)))
     tasks = [
         asyncio.create_task(prober_loop(), name="prober_loop"),
         asyncio.create_task(cron_loop(), name="cron_loop"),
@@ -153,9 +178,26 @@ app = FastAPI(title="bls-proxy-service", lifespan=lifespan,
 # --------------------------------------------------------------------------- #
 # Авторизация
 # --------------------------------------------------------------------------- #
-def require_bot(x_bot_token: str = Header(default="")) -> None:
-    if not secrets.compare_digest(x_bot_token.encode(), BOT_TOKEN.encode()):
+def require_bot(x_bot_token: str = Header(default="")) -> str:
+    """Возвращает цель (purpose), к которой привязан токен. Перебираем все токены без раннего выхода."""
+    got = x_bot_token.encode()
+    scope = None
+    for pur, tok in BOT_TOKEN_PURPOSES.items():
+        if secrets.compare_digest(got, tok.encode()):
+            scope = pur
+    if scope is None:
         raise HTTPException(401, "bad bot token")
+    return scope
+
+
+async def _check_lease_scope(lease_id: str, scope: str) -> None:
+    """Аренда должна принадлежать цели токена. Неизвестная аренда — не наша забота (дальше ответит БД)."""
+    try:
+        pur = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_purpose($1::uuid)", lease_id)
+    except asyncpg.PostgresError:
+        raise HTTPException(400, "bad lease_id")
+    if pur is not None and pur != scope:
+        raise HTTPException(403, f"token scope '{scope}' cannot touch '{pur}' lease")
 
 
 def require_ocr(x_bot_token: str = Header(default="")) -> None:
@@ -218,7 +260,9 @@ bot = APIRouter(dependencies=[Depends(require_bot)])
 
 
 @bot.post("/acquire")
-async def acquire(req: AcquireRequest):
+async def acquire(req: AcquireRequest, scope: str = Depends(require_bot)):
+    if req.purpose != scope:
+        raise HTTPException(403, f"token scope '{scope}' cannot acquire purpose '{req.purpose}'")
     rows = await pools["issuer"].fetch(
         f"select * from {SCHEMA}.acquire_proxies("
         "p_account_id := $1, p_count := $2, p_ttl_seconds := $3, "
@@ -253,7 +297,8 @@ async def acquire(req: AcquireRequest):
 
 
 @bot.post("/renew")
-async def renew(req: RenewRequest):
+async def renew(req: RenewRequest, scope: str = Depends(require_bot)):
+    await _check_lease_scope(req.lease_id, scope)
     until = await pools["issuer"].fetchval(
         f"select {SCHEMA}.renew_lease($1::uuid, $2)", req.lease_id, req.ttl_seconds
     )
@@ -263,7 +308,8 @@ async def renew(req: RenewRequest):
 
 
 @bot.post("/report")
-async def report(req: ReportRequest):
+async def report(req: ReportRequest, scope: str = Depends(require_bot)):
+    await _check_lease_scope(req.lease_id, scope)
     if req.event_type not in ("cycle_ok", "error"):
         raise HTTPException(400, "event_type must be 'cycle_ok' or 'error'")
     await pools["reporter"].execute(
@@ -276,7 +322,8 @@ async def report(req: ReportRequest):
 
 
 @bot.post("/release")
-async def release(req: ReleaseRequest):
+async def release(req: ReleaseRequest, scope: str = Depends(require_bot)):
+    await _check_lease_scope(req.lease_id, scope)
     await pools["reporter"].execute(
         f"select {SCHEMA}.release_lease($1::uuid, $2, $3, $4, $5::jsonb)",
         req.lease_id, req.reason, req.error_code, req.phase, json.dumps(req.detail),
