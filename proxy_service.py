@@ -610,6 +610,26 @@ async def admin_stats(hours: int = 24, purpose: Optional[str] = None, minutes: O
     }
 
 
+@admin.get("/dt_funnel")
+async def admin_dt_funnel(hours: int = 24, purpose: Optional[str] = None):
+    """Воронка Date/Time: итог каждого цикла, дошедшего до выбора даты/времени (нужен sql/21_dt_funnel.sql)."""
+    hours = max(1, min(int(hours), 336))
+    pur = _purpose_arg(purpose) or "bls"
+    try:
+        tot = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_dt_funnel_total($1, $2)", pur, hours)
+        pts = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_dt_funnel($1, $2)", pur, hours)
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/21_dt_funnel.sql")
+    by_t: dict = {}
+    for r in pts:
+        by_t.setdefault(r["bucket"].isoformat(), {})[r["stage"]] = r["n"]
+    return {
+        "hours": hours,
+        "stages": [{"stage": r["stage"], "n": r["n"], "p50": r["xhr_p50_ms"], "p90": r["xhr_p90_ms"]} for r in tot],
+        "points": [{"t": t, "c": c} for t, c in by_t.items()],
+    }
+
+
 @admin.post("/proxies")
 async def admin_add(req: AddProxies):
     if req.scheme not in ALLOWED_SCHEMES:

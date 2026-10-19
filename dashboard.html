@@ -121,6 +121,11 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 #chart .ln{fill:none;stroke-width:1.8;stroke-linejoin:round}
 .chip .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 #chart .hv{fill:transparent}#chart .hv:hover{fill:var(--accbg);opacity:.6}
+.dtf{display:grid;grid-template-columns:200px 1fr 150px;gap:6px 12px;align-items:center;font-size:12.5px}
+.dtf .nm{color:var(--fg)}.dtf .nm small{display:block;color:var(--mut);font-size:11px}
+.dtf .bar{height:14px;border-radius:7px;background:var(--ln2);overflow:hidden}.dtf .bar i{display:block;height:100%;border-radius:7px}
+.dtf .vl{color:var(--mut);text-align:right;white-space:nowrap}.dtf .vl b{color:var(--fg)}
+.dtf .sep{grid-column:1/-1;border-top:1px solid var(--ln);margin:4px 0}
 .cmsg{color:var(--mut);padding:30px 8px;text-align:center;font-size:13px}
 
 .duo{display:grid;grid-template-columns:minmax(360px,5fr) 7fr;gap:18px;margin-bottom:18px;align-items:stretch}
@@ -195,6 +200,11 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
   <div class="bd"><div id="chart"><div class="cmsg">загрузка…</div></div></div>
 </section>
 </div>
+
+<section class="card" id="dtf">
+  <div class="hd"><h2>Воронка Date/Time</h2><div class="chips" id="dtchips"></div></div>
+  <div class="bd"><div id="dtbody"><div class="cmsg">загрузка…</div></div></div>
+</section>
 
 <section class="card" id="pools">
   <div class="hd"><h2>Пулы</h2><span class="cnt" id="poolcnt">0</span></div>
@@ -446,7 +456,7 @@ async function loadStats(){
     $('#chart').innerHTML='<div class="cmsg">'+(m.startsWith('501')||m.startsWith('404')?(statM?'Для мелких диапазонов накатите <code>sql/20_chart_fine.sql</code> в Supabase и обновите сервис.':'График появится после установки <code>sql/09_stats.sql</code> в Supabase и обновления сервиса.'):'Не удалось загрузить статистику: '+esc(m.slice(0,160)))+'</div>'}
 }
 $('#seg').addEventListener('click',e=>{const h=e.target.dataset.h,m=e.target.dataset.m;if(!h&&!m)return;statM=m?+m:0;if(h)statH=+h;
-  document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats()});
+  document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats();loadDt()});
 function applyPurposeUi(){
   document.querySelectorAll('#pseg button').forEach(b=>b.classList.toggle('on',b.dataset.p===CH));
   $('#steps h2').textContent=isBlsMode()?'Настройки ступеней':'Настройки ступеней · '+PNAME[PUR];
@@ -454,10 +464,49 @@ function applyPurposeUi(){
   document.title='Proxy Manager'+(isBlsMode()?'':' · '+PNAME[PUR]);
 }
 $('#pseg').addEventListener('click',e=>{const p=e.target.dataset.p;if(!p||p===CH)return;
-  if(p==='ocr'||p===PUR){CH=p;applyPurposeUi();loadStats();return}  // OCR / возврат к текущей цели: меняется только график
+  if(p==='ocr'||p===PUR){CH=p;applyPurposeUi();loadStats();loadDt();return}  // OCR / возврат к текущей цели: меняется только график
   PUR=p;CH=p;try{localStorage.setItem('blsPurpose',p)}catch(x){}
   sel.clear();cfgShown=false;S={summary:[],proxies:[],leases:[],events:[],settings:[]};
-  applyPurposeUi();refresh();loadStats()});
+  applyPurposeUi();refresh();loadStats();loadDt()});
+
+// ---------- воронка Date/Time (sql/21_dt_funnel.sql) ----------
+const DT=[
+ ['dt_no_dates','Дат нет','страница открылась, availDates пусто','#94a3b8'],
+ ['dt_xhr_failed','Время не пришло','ответ GetAvailableSlotsByDate не получен','#ca8a04'],
+ ['dt_max_requests','Лимит запросов BLS','maximum number of requests','#7c3aed'],
+ ['dt_no_free_time','Даты есть, время занято','все слоты уже без мест','#2563eb'],
+ ['dt_no_time','Времени не нашли','проходы пересканирования закончились','#0891b2'],
+ ['dt_times_seen','Время видели, не выбрали','цикл прервался до выбора','#65a30d'],
+ ['dt_time_selected','Время выбрано, Submit не дошёл','выбор прошёл, итога нет','#db2777'],
+ ['dt_slot_taken','Slot already taken','выбрали и нажали, слот ушёл','#ea580c'],
+ ['dt_booked','Бронь','запись подтверждена','#16a34a'],
+ ['dt_otp','OTP','потребовался код','#9333ea'],
+ ['dt_submit_other','Submit: иной исход','лимит записей, неизвестный ответ','#b45309'],
+ ['dt_open','Открыли, дальше не ушли','обрыв до сканирования дат','#64748b']];
+const DT_SEL=['dt_time_selected','dt_slot_taken','dt_booked','dt_otp','dt_submit_other'];
+const msf=v=>v==null?'':(v>=1000?(v/1000).toFixed(1).replace('.',',')+' с':v+' мс');
+function drawDt(d){
+  const m={};(d.stages||[]).forEach(s=>m[s.stage]=s);
+  const tot=(d.stages||[]).reduce((a,s)=>a+s.n,0);
+  if(!tot){$('#dtchips').innerHTML='';$('#dtbody').innerHTML='<div class="cmsg">за период нет циклов, дошедших до Date/Time (нужна пачка 4а в кликере)</div>';return}
+  const n=k=>(m[k]&&m[k].n)||0,pc=v=>(100*v/tot).toFixed(1).replace('.',',')+'%';
+  const sel=DT_SEL.reduce((a,k)=>a+n(k),0),sub=n('dt_slot_taken')+n('dt_booked')+n('dt_otp')+n('dt_submit_other');
+  const xs=(d.stages||[]).filter(s=>s.p50!=null);
+  const xhr=xs.length?Math.round(xs.reduce((a,s)=>a+s.p50*s.n,0)/xs.reduce((a,s)=>a+s.n,0)):null;
+  $('#dtchips').innerHTML=`<span class="chip">циклов <b>${nfmt(tot)}</b></span>`
+    +`<span class="chip g" title="Время выбрано (включая тех, кто дошёл до Submit)">выбрали время <b>${nfmt(sel)}</b> · ${pc(sel)}</span>`
+    +`<span class="chip" title="Нажат Submit: slot taken + бронь + OTP + иное">Submit <b>${nfmt(sub)}</b></span>`
+    +(xhr!=null?`<span class="chip w" title="Средняя по циклам медиана ответа BLS на GetAvailableSlotsByDate">ответ BLS ≈ <b>${msf(xhr)}</b></span>`:'');
+  const max=Math.max(...DT.map(r=>n(r[0])));
+  $('#dtbody').innerHTML='<div class="dtf">'+DT.filter(r=>n(r[0])).map(r=>{const s=m[r[0]];
+    return `<div class="nm">${esc(r[1])}<small>${esc(r[2])}</small></div><div class="bar"><i style="width:${Math.max(2,100*s.n/max)}%;background:${r[3]}"></i></div>`
+      +`<div class="vl"><b>${nfmt(s.n)}</b> · ${pc(s.n)}${s.p50!=null?`<br>ответ ${msf(s.p50)} / p90 ${msf(s.p90)}`:''}</div>`}).join('')+'</div>';
+}
+async function loadDt(){
+  try{drawDt(await api('/admin/api/dt_funnel?hours='+(statM?Math.max(1,Math.ceil(statM/60)):statH)+(CH==='bls'||CH==='ocr'?'':'&purpose='+CH)))}
+  catch(e){const m=String(e.message);$('#dtchips').innerHTML='';
+    $('#dtbody').innerHTML='<div class="cmsg">'+(m.startsWith('501')?'Накатите <code>sql/21_dt_funnel.sql</code> в Supabase и обновите сервис.':'Не удалось загрузить: '+esc(m.slice(0,160)))+'</div>'}
+}
 applyPurposeUi();
-refresh();loadStats();setInterval(refresh,10000);setInterval(loadStats,10000);
+refresh();loadStats();loadDt();setInterval(refresh,10000);setInterval(loadStats,10000);setInterval(loadDt,15000);
 </script></body></html>
