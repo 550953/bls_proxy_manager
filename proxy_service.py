@@ -504,9 +504,49 @@ async def admin_state(purpose: Optional[str] = None):
     }
 
 
+_FINE_BUCKET_S = {5: 15, 30: 60, 60: 60, 720: 900}  # окно (мин) -> ширина корзины (с)
+
+
+async def _stats_fine(purpose: Optional[str], minutes: int):
+    bsec = _FINE_BUCKET_S.get(minutes) or max(15, int(minutes * 60 / 48))
+    pur = "ocr" if purpose == "ocr" else (_purpose_arg(purpose) or "bls")
+    try:
+        rows = await pools["admin"].fetch(
+            f"select * from {SCHEMA}.admin_chart_fine($1, $2, $3)", pur, minutes, bsec)
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/20_chart_fine.sql")
+    base = {"hours": minutes / 60, "minutes": minutes, "bucket_s": bsec, "fine": True, "cf": None}
+    if pur == "ocr":
+        by: dict = {}
+        for r in rows:
+            pt = by.setdefault(r["bucket"].isoformat(), {"ok": 0, "err": 0})
+            if r["kind"] == "err":
+                pt["err"] = r["n"]
+        return {**base, "ocr": True, "points": [{"t": t, **v} for t, v in by.items()]}
+    by_t: dict = {}
+    totals: dict = {}
+    for r in rows:
+        pt = by_t.setdefault(r["bucket"].isoformat(), {"ok": 0, "no_slots": 0, "errs": {}})
+        k = r["kind"]
+        if k is None:
+            continue
+        if k == "ok":
+            pt["ok"] = r["n"]
+        elif k == "NO_SLOTS":
+            pt["no_slots"] = r["n"]
+        else:
+            pt["errs"][k] = r["n"]
+            totals[k] = totals.get(k, 0) + r["n"]
+    return {**base, "codes": sorted(totals, key=lambda c: -totals[c]),
+            "points": [{"t": t, **v} for t, v in by_t.items()]}
+
+
 @admin.get("/stats")
-async def admin_stats(hours: int = 24, purpose: Optional[str] = None):
-    """Точки для графика: успешные циклы и ошибки по часам/суткам (нужен sql/09_stats.sql)."""
+async def admin_stats(hours: int = 24, purpose: Optional[str] = None, minutes: Optional[int] = None):
+    """Точки для графика: успешные циклы и ошибки по часам/суткам (нужен sql/09_stats.sql).
+    minutes=5|30|60|720 — мелкий масштаб (нужен sql/20_chart_fine.sql), корзины от 15 с до 15 мин."""
+    if minutes:
+        return await _stats_fine(purpose, max(1, min(int(minutes), 1440)))
     hours = max(1, min(int(hours), 336))
     if purpose == "ocr":  # отдельный график OCR (нужен sql/18_ocr_stats.sql); аренд и Cloudflare у OCR нет
         try:

@@ -190,7 +190,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 </section>
 <section class="card" id="stat">
   <div class="hd"><h2>Статистика</h2><div class="chips" id="chips"></div>
-    <div class="seg" id="seg"><button data-h="24" class="on">24 ч</button><button data-h="168">7 дней</button></div>
+    <div class="seg" id="seg"><button data-m="5">5 мин</button><button data-m="30">30 мин</button><button data-m="60">1 ч</button><button data-m="720">12 ч</button><button data-h="24" class="on">24 ч</button><button data-h="168">7 дней</button></div>
   </div>
   <div class="bd"><div id="chart"><div class="cmsg">загрузка…</div></div></div>
 </section>
@@ -396,7 +396,7 @@ document.querySelectorAll('#nav a').forEach(a=>a.addEventListener('click',()=>{i
 tg.onclick=()=>setMenu(app.classList.contains('collapsed'));
 
 // ---------- график: успешные циклы и ошибки ----------
-let statH=24,statLast=null,CH=PUR; // CH — вкладка графика: bls | visaglobal | ocr (ocr не меняет остальную страницу)
+let statH=24,statM=0,statLast=null,CH=PUR; // CH — вкладка графика: bls | visaglobal | ocr (ocr не меняет остальную страницу)
 const nfmt=n=>Number(n).toLocaleString('ru-RU');
 const CODE_COL={HTTP_429:'#dc2626',HTTP_403:'#ea580c',CF_CHALLENGE_LOOP:'#7c3aed',PROXY_TIMEOUT:'#ca8a04',PROXY_CONNECT_FAILED:'#0891b2',UNKNOWN:'#94a3b8'};
 const PAL=['#db2777','#0d9488','#65a30d','#9333ea','#b45309','#0369a1'],NS_COL='#2563eb',CF='CF_CHALLENGE_LOOP';
@@ -417,7 +417,7 @@ function drawChart(d){
       +ser.slice(2).map((s,i)=>`<span class="chip"><i class="dot" style="background:${s.c}"></i>${esc(s.n)} <b>${nfmt(tot[i+2])}</b></span>`).join('');
   }else{
     const erT=tot[1],t2=okT+erT;
-    $('#chips').innerHTML=`<span class="chip g" title="${oc?'Успешные OCR-запросы (по отчётам прокси)':''}">${oc?'запросы ок':'успешные'} <b>${nfmt(okT)}</b></span><span class="chip r" title="${oc?'Неуспешные запросы + гео-отказы Gemini. Единицы — запросы, не циклы: с BLS по высоте не сравнивать':''}">${oc?'сбои':'ошибки'} <b>${nfmt(erT)}</b></span><span class="chip" title="${oc?'Доля сбоев среди OCR-запросов':'Доля ошибок среди циклов этой цели'}">${oc?'% сбоев':'ошибок'} <b>${t2?(100*erT/t2).toFixed(1).replace('.',','):'0'}%</b></span>`
+    $('#chips').innerHTML=`<span class="chip g" title="${oc?'Успешные OCR-запросы (по отчётам прокси)':''}">${oc?'запросы ок':'успешные'} <b>${oc&&d.fine?'н/д':nfmt(okT)}</b></span><span class="chip r" title="${oc?'Неуспешные запросы + гео-отказы Gemini. Единицы — запросы, не циклы: с BLS по высоте не сравнивать':''}">${oc?'сбои':'ошибки'} <b>${nfmt(erT)}</b></span><span class="chip" title="${oc?'Доля сбоев среди OCR-запросов':'Доля ошибок среди циклов этой цели'}">${oc?'% сбоев':'ошибок'} <b>${t2?(100*erT/t2).toFixed(1).replace('.',','):'0'}%</b></span>`
       +(d.cf==null||(!d.cf&&isBlsMode())?'':`<span class="chip w" title="Зависания на Cloudflare (CF_CHALLENGE_LOOP): не ошибка прокси, в проценты и график не входят">Cloudflare <b>${nfmt(d.cf)}</b></span>`);
   }
   if(!pts.length||!all){$('#chart').innerHTML='<div class="cmsg">'+(oc?'OCR-статистика копится с момента установки sql/18_ocr_stats.sql; история до этого не велась':'за этот период событий пока нет')+'</div>';return}
@@ -430,21 +430,22 @@ function drawChart(d){
   const grid=Array.from({length:nice/unit+1},(_,i)=>i*unit).map(v=>{const y=Y(v);return `<line class="gl" x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/><text class="ax" x="${L-6}" y="${y+4}" text-anchor="end">${nfmt(v)}</text>`}).join('');
   const daily=d.hours>72,every=Math.max(1,Math.ceil(pts.length/6));
   const lab=pts.map((p,i)=>{if(i%every)return'';const dt=new Date(p.t);
-    const s=daily?dt.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}):dt.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+    const s=daily?dt.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}):dt.toLocaleTimeString('ru-RU',d.bucket_s<60?{hour:'2-digit',minute:'2-digit',second:'2-digit'}:{hour:'2-digit',minute:'2-digit'});
     return `<text class="ax" x="${X(i)}" y="${H-6}" text-anchor="middle">${s}</text>`}).join('');
   const bw=iw/Math.max(1,pts.length-1);
-  const hv=pts.map((p,i)=>{const dt=new Date(p.t);const s=daily?dt.toLocaleDateString('ru-RU'):dt.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  const hv=pts.map((p,i)=>{const dt=new Date(p.t);const s=daily?dt.toLocaleDateString('ru-RU'):dt.toLocaleString('ru-RU',d.bucket_s<60?{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}:{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
     return `<rect class="hv" x="${X(i)-bw/2}" y="${T}" width="${bw}" height="${ih}"><title>${s}\n${ser.map(q=>q.n+': '+q.v(p)).join('\n')}</title></rect>`}).join('');
-  const paths=ser.map(s=>`<path class="ln" style="stroke:${s.c}" d="${line(s)}"/>`).join('');
+  const paths=ser.map(s=>`<path class="ln" style="stroke:${s.c}" d="${line(s)}"/>`).join('')
+    +(pts.length<=3?ser.map(s=>pts.map((p,i)=>`<circle cx="${X(i)}" cy="${Y(s.v(p))}" r="3" fill="${s.c}"/>`).join('')).join(''):'');
   $('#chart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="график циклов и ошибок по кодам">${grid}${lab}
     <path class="ar" d="${line(ser[0])} L${X(pts.length-1)} ${Y(0)} L${X(0)} ${Y(0)} Z" opacity=".7"/>${paths}${hv}</svg>`;
 }
 async function loadStats(){
-  try{statLast=await api('/admin/api/stats?hours='+statH+(CH==='bls'?'':'&purpose='+CH));drawChart(statLast)}
+  try{statLast=await api('/admin/api/stats?'+(statM?'minutes='+statM:'hours='+statH)+(CH==='bls'?'':'&purpose='+CH));drawChart(statLast)}
   catch(e){const m=String(e.message);$('#chips').innerHTML='';
-    $('#chart').innerHTML='<div class="cmsg">'+(m.startsWith('501')||m.startsWith('404')?'График появится после установки <code>sql/09_stats.sql</code> в Supabase и обновления сервиса.':'Не удалось загрузить статистику: '+esc(m.slice(0,160)))+'</div>'}
+    $('#chart').innerHTML='<div class="cmsg">'+(m.startsWith('501')||m.startsWith('404')?(statM?'Для мелких диапазонов накатите <code>sql/20_chart_fine.sql</code> в Supabase и обновите сервис.':'График появится после установки <code>sql/09_stats.sql</code> в Supabase и обновления сервиса.'):'Не удалось загрузить статистику: '+esc(m.slice(0,160)))+'</div>'}
 }
-$('#seg').addEventListener('click',e=>{const h=e.target.dataset.h;if(!h)return;statH=+h;
+$('#seg').addEventListener('click',e=>{const h=e.target.dataset.h,m=e.target.dataset.m;if(!h&&!m)return;statM=m?+m:0;if(h)statH=+h;
   document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats()});
 function applyPurposeUi(){
   document.querySelectorAll('#pseg button').forEach(b=>b.classList.toggle('on',b.dataset.p===CH));
@@ -458,5 +459,5 @@ $('#pseg').addEventListener('click',e=>{const p=e.target.dataset.p;if(!p||p===CH
   sel.clear();cfgShown=false;S={summary:[],proxies:[],leases:[],events:[],settings:[]};
   applyPurposeUi();refresh();loadStats()});
 applyPurposeUi();
-refresh();loadStats();setInterval(refresh,10000);setInterval(loadStats,60000);
+refresh();loadStats();setInterval(refresh,10000);setInterval(loadStats,10000);
 </script></body></html>
