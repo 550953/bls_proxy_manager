@@ -118,6 +118,8 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 #chart .la{fill:none;stroke:var(--ok);stroke-width:1.8;stroke-linejoin:round}
 #chart .ar{fill:var(--okbg)}
 #chart .le{fill:none;stroke:var(--bad);stroke-width:1.8;stroke-linejoin:round}
+#chart .ln{fill:none;stroke-width:1.8;stroke-linejoin:round}
+.chip .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 #chart .hv{fill:transparent}#chart .hv:hover{fill:var(--accbg);opacity:.6}
 .cmsg{color:var(--mut);padding:30px 8px;text-align:center;font-size:13px}
 
@@ -396,19 +398,35 @@ tg.onclick=()=>setMenu(app.classList.contains('collapsed'));
 // ---------- график: успешные циклы и ошибки ----------
 let statH=24,statLast=null,CH=PUR; // CH — вкладка графика: bls | visaglobal | ocr (ocr не меняет остальную страницу)
 const nfmt=n=>Number(n).toLocaleString('ru-RU');
+const CODE_COL={HTTP_429:'#dc2626',HTTP_403:'#ea580c',CF_CHALLENGE_LOOP:'#7c3aed',PROXY_TIMEOUT:'#ca8a04',PROXY_CONNECT_FAILED:'#0891b2',UNKNOWN:'#94a3b8'};
+const PAL=['#db2777','#0d9488','#65a30d','#9333ea','#b45309','#0369a1'],NS_COL='#2563eb',CF='CF_CHALLENGE_LOOP';
 function drawChart(d){
-  const pts=d.points||[];
-  const okT=pts.reduce((a,p)=>a+p.ok,0),erT=pts.reduce((a,p)=>a+p.err,0),tot=okT+erT;
-  const oc=!!d.ocr;
-  $('#chips').innerHTML=`<span class="chip g" title="${oc?'Успешные OCR-запросы (по отчётам прокси)':''}">${oc?'запросы ок':'успешные'} <b>${nfmt(okT)}</b></span><span class="chip r" title="${oc?'Неуспешные запросы + гео-отказы Gemini. Единицы — запросы, не циклы: с BLS по высоте не сравнивать':''}">${oc?'сбои':'ошибки'} <b>${nfmt(erT)}</b></span><span class="chip" title="${oc?'Доля сбоев среди OCR-запросов':'Доля ошибок среди циклов этой цели'}">${oc?'% сбоев':'ошибок'} <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span>`
-    +(d.cf==null||(!d.cf&&isBlsMode())?'':`<span class="chip w" title="Зависания на Cloudflare (CF_CHALLENGE_LOOP): не ошибка прокси, в проценты и график не входят">Cloudflare <b>${nfmt(d.cf)}</b></span>`);
-  if(!pts.length||!tot){$('#chart').innerHTML='<div class="cmsg">'+(oc?'OCR-статистика копится с момента установки sql/18_ocr_stats.sql; история до этого не велась':'за этот период событий пока нет')+'</div>';return}
+  const pts=d.points||[],oc=!!d.ocr,bc=!!d.codes;
+  let ser,tot;
+  if(bc){let pi=0;
+    ser=[{n:'успешные',c:'var(--ok)',area:1,v:p=>p.ok},{n:'нет слотов',c:NS_COL,v:p=>p.no_slots||0},
+      ...d.codes.map(k=>({n:k,c:CODE_COL[k]||PAL[pi++%PAL.length],v:p=>(p.errs&&p.errs[k])||0,cf:k===CF}))];
+  }else ser=[{n:'успешные',c:'var(--ok)',area:1,v:p=>p.ok},{n:'ошибки',c:'var(--bad)',v:p=>p.err}];
+  tot=ser.map(s=>pts.reduce((a,p)=>a+s.v(p),0));
+  const okT=tot[0],all=tot.reduce((a,b)=>a+b,0);
+  if(bc){
+    const erT=ser.reduce((a,s,i)=>a+(i>1&&!s.cf?tot[i]:0),0),den=okT+tot[1]+erT;
+    $('#chips').innerHTML=`<span class="chip g">успешные <b>${nfmt(okT)}</b></span>`
+      +`<span class="chip" title="Цикл дошёл до проверки слотов, слотов нет. Не ошибка, в % ошибок не входит"><i class="dot" style="background:${NS_COL}"></i>нет слотов <b>${nfmt(tot[1])}</b></span>`
+      +`<span class="chip r" title="Ошибки по кодам, без Cloudflare. Доля считается от успешных + нет слотов + ошибок">ошибки <b>${nfmt(erT)}</b> · ${den?(100*erT/den).toFixed(1).replace('.',','):'0'}%</span>`
+      +ser.slice(2).map((s,i)=>`<span class="chip"><i class="dot" style="background:${s.c}"></i>${esc(s.n)} <b>${nfmt(tot[i+2])}</b></span>`).join('');
+  }else{
+    const erT=tot[1],t2=okT+erT;
+    $('#chips').innerHTML=`<span class="chip g" title="${oc?'Успешные OCR-запросы (по отчётам прокси)':''}">${oc?'запросы ок':'успешные'} <b>${nfmt(okT)}</b></span><span class="chip r" title="${oc?'Неуспешные запросы + гео-отказы Gemini. Единицы — запросы, не циклы: с BLS по высоте не сравнивать':''}">${oc?'сбои':'ошибки'} <b>${nfmt(erT)}</b></span><span class="chip" title="${oc?'Доля сбоев среди OCR-запросов':'Доля ошибок среди циклов этой цели'}">${oc?'% сбоев':'ошибок'} <b>${t2?(100*erT/t2).toFixed(1).replace('.',','):'0'}%</b></span>`
+      +(d.cf==null||(!d.cf&&isBlsMode())?'':`<span class="chip w" title="Зависания на Cloudflare (CF_CHALLENGE_LOOP): не ошибка прокси, в проценты и график не входят">Cloudflare <b>${nfmt(d.cf)}</b></span>`);
+  }
+  if(!pts.length||!all){$('#chart').innerHTML='<div class="cmsg">'+(oc?'OCR-статистика копится с момента установки sql/18_ocr_stats.sql; история до этого не велась':'за этот период событий пока нет')+'</div>';return}
   const W=640,H=168,L=38,R=8,T=10,B=22,iw=W-L-R,ih=H-T-B;
-  const max=Math.max(1,...pts.map(p=>Math.max(p.ok,p.err)));
+  const max=Math.max(1,...pts.map(p=>Math.max(...ser.map(s=>s.v(p)))));
   const unit=max<=5?1:(()=>{const s=Math.pow(10,Math.floor(Math.log10(max/4)));return [1,2,5,10].map(m=>m*s).find(v=>max/v<=5)})();
   const nice=Math.ceil(max/unit)*unit;
   const X=i=>L+(pts.length>1?iw*i/(pts.length-1):iw/2),Y=v=>T+ih-ih*v/nice;
-  const line=k=>pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[k]).toFixed(1)).join(' ');
+  const line=s=>pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(s.v(p)).toFixed(1)).join(' ');
   const grid=Array.from({length:nice/unit+1},(_,i)=>i*unit).map(v=>{const y=Y(v);return `<line class="gl" x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/><text class="ax" x="${L-6}" y="${y+4}" text-anchor="end">${nfmt(v)}</text>`}).join('');
   const daily=d.hours>72,every=Math.max(1,Math.ceil(pts.length/6));
   const lab=pts.map((p,i)=>{if(i%every)return'';const dt=new Date(p.t);
@@ -416,10 +434,10 @@ function drawChart(d){
     return `<text class="ax" x="${X(i)}" y="${H-6}" text-anchor="middle">${s}</text>`}).join('');
   const bw=iw/Math.max(1,pts.length-1);
   const hv=pts.map((p,i)=>{const dt=new Date(p.t);const s=daily?dt.toLocaleDateString('ru-RU'):dt.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
-    return `<rect class="hv" x="${X(i)-bw/2}" y="${T}" width="${bw}" height="${ih}"><title>${s}\nуспешные: ${p.ok}\nошибки: ${p.err}</title></rect>`}).join('');
-  $('#chart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="график успешных циклов и ошибок">${grid}${lab}
-    <path class="ar" d="${line('ok')} L${X(pts.length-1)} ${Y(0)} L${X(0)} ${Y(0)} Z" opacity=".7"/>
-    <path class="la" d="${line('ok')}"/><path class="le" d="${line('err')}"/>${hv}</svg>`;
+    return `<rect class="hv" x="${X(i)-bw/2}" y="${T}" width="${bw}" height="${ih}"><title>${s}\n${ser.map(q=>q.n+': '+q.v(p)).join('\n')}</title></rect>`}).join('');
+  const paths=ser.map(s=>`<path class="ln" style="stroke:${s.c}" d="${line(s)}"/>`).join('');
+  $('#chart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="график циклов и ошибок по кодам">${grid}${lab}
+    <path class="ar" d="${line(ser[0])} L${X(pts.length-1)} ${Y(0)} L${X(0)} ${Y(0)} Z" opacity=".7"/>${paths}${hv}</svg>`;
 }
 async function loadStats(){
   try{statLast=await api('/admin/api/stats?hours='+statH+(CH==='bls'?'':'&purpose='+CH));drawChart(statLast)}

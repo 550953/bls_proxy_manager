@@ -520,6 +520,36 @@ async def admin_stats(hours: int = 24, purpose: Optional[str] = None):
             "points": [{"t": r["bucket"].isoformat(), "ok": r["ok"], "err": r["err"]} for r in rows],
         }
     pur = _purpose_arg(purpose)
+    try:  # BLS/VisaGlobal: линии по кодам (нужен sql/19_chart_by_code.sql); без функции — старый график
+        crow = await pools["admin"].fetch(
+            f"select * from {SCHEMA}.admin_chart_by_code($1, $2)", pur or "bls", hours)
+    except asyncpg.UndefinedFunctionError:
+        crow = None
+    if crow is not None:
+        by_t: dict = {}
+        totals: dict = {}
+        for r in crow:
+            pt = by_t.setdefault(r["bucket"].isoformat(), {"ok": 0, "no_slots": 0, "errs": {}})
+            if r["kind"] is None:
+                continue
+            if r["kind"] == "ok":
+                pt["ok"] = r["n"]
+            elif r["kind"] == "NO_SLOTS":
+                pt["no_slots"] = r["n"]
+            else:
+                pt["errs"][r["kind"]] = r["n"]
+                totals[r["kind"]] = totals.get(r["kind"], 0) + r["n"]
+        try:
+            cf = await pools["admin"].fetchval(
+                f"select {SCHEMA}.admin_purpose_code_count($1, $2, $3)", pur or "bls", CF_CODE, hours)
+        except asyncpg.UndefinedFunctionError:
+            cf = None
+        return {
+            "hours": hours,
+            "cf": cf,
+            "codes": sorted(totals, key=lambda c: -totals[c]),
+            "points": [{"t": t, **v} for t, v in by_t.items()],
+        }
     try:
         if pur:
             rows = await pools["admin"].fetch(
