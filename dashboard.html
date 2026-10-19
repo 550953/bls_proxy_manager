@@ -160,7 +160,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
   <div>
     <h1>Proxy Manager <span class="live" id="live">работает</span></h1>
     <div class="sub">Управление, проверка и мониторинг прокси</div>
-    <div class="seg" id="pseg" style="margin:8px 0 0"><button data-p="bls" class="on">BLS</button><button data-p="visaglobal">VisaGlobal</button></div>
+    <div class="seg" id="pseg" style="margin:8px 0 0"><button data-p="bls" class="on">BLS</button><button data-p="visaglobal">VisaGlobal</button><button data-p="ocr" title="Только график: OCR-запросы по часам. Таблицы и события остаются у выбранной цели">OCR</button></div>
   </div>
   <div class="upd" id="upd">—</div>
 </header>
@@ -394,14 +394,15 @@ document.querySelectorAll('#nav a').forEach(a=>a.addEventListener('click',()=>{i
 tg.onclick=()=>setMenu(app.classList.contains('collapsed'));
 
 // ---------- график: успешные циклы и ошибки ----------
-let statH=24,statLast=null;
+let statH=24,statLast=null,CH=PUR; // CH — вкладка графика: bls | visaglobal | ocr (ocr не меняет остальную страницу)
 const nfmt=n=>Number(n).toLocaleString('ru-RU');
 function drawChart(d){
   const pts=d.points||[];
   const okT=pts.reduce((a,p)=>a+p.ok,0),erT=pts.reduce((a,p)=>a+p.err,0),tot=okT+erT;
-  $('#chips').innerHTML=`<span class="chip g">успешные <b>${nfmt(okT)}</b></span><span class="chip r">ошибки <b>${nfmt(erT)}</b></span><span class="chip" title="BLS: цикл ок / ошибка · OCR: сбои канала и гео-отказы">ошибок <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span>`
+  const oc=!!d.ocr;
+  $('#chips').innerHTML=`<span class="chip g" title="${oc?'Успешные OCR-запросы (по отчётам прокси)':''}">${oc?'запросы ок':'успешные'} <b>${nfmt(okT)}</b></span><span class="chip r" title="${oc?'Неуспешные запросы + гео-отказы Gemini. Единицы — запросы, не циклы: с BLS по высоте не сравнивать':''}">${oc?'сбои':'ошибки'} <b>${nfmt(erT)}</b></span><span class="chip" title="${oc?'Доля сбоев среди OCR-запросов':'Доля ошибок среди циклов этой цели'}">${oc?'% сбоев':'ошибок'} <b>${tot?(100*erT/tot).toFixed(1).replace('.',','):'0'}%</b></span>`
     +(d.cf==null||(!d.cf&&isBlsMode())?'':`<span class="chip w" title="Зависания на Cloudflare (CF_CHALLENGE_LOOP): не ошибка прокси, в проценты и график не входят">Cloudflare <b>${nfmt(d.cf)}</b></span>`);
-  if(!pts.length||!tot){$('#chart').innerHTML='<div class="cmsg">за этот период событий пока нет</div>';return}
+  if(!pts.length||!tot){$('#chart').innerHTML='<div class="cmsg">'+(oc?'OCR-статистика копится с момента установки sql/18_ocr_stats.sql; история до этого не велась':'за этот период событий пока нет')+'</div>';return}
   const W=640,H=168,L=38,R=8,T=10,B=22,iw=W-L-R,ih=H-T-B;
   const max=Math.max(1,...pts.map(p=>Math.max(p.ok,p.err)));
   const unit=max<=5?1:(()=>{const s=Math.pow(10,Math.floor(Math.log10(max/4)));return [1,2,5,10].map(m=>m*s).find(v=>max/v<=5)})();
@@ -421,20 +422,21 @@ function drawChart(d){
     <path class="la" d="${line('ok')}"/><path class="le" d="${line('err')}"/>${hv}</svg>`;
 }
 async function loadStats(){
-  try{statLast=await api('/admin/api/stats?hours='+statH+(isBlsMode()?'':'&purpose='+PUR));drawChart(statLast)}
+  try{statLast=await api('/admin/api/stats?hours='+statH+(CH==='bls'?'':'&purpose='+CH));drawChart(statLast)}
   catch(e){const m=String(e.message);$('#chips').innerHTML='';
     $('#chart').innerHTML='<div class="cmsg">'+(m.startsWith('501')||m.startsWith('404')?'График появится после установки <code>sql/09_stats.sql</code> в Supabase и обновления сервиса.':'Не удалось загрузить статистику: '+esc(m.slice(0,160)))+'</div>'}
 }
 $('#seg').addEventListener('click',e=>{const h=e.target.dataset.h;if(!h)return;statH=+h;
   document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats()});
 function applyPurposeUi(){
-  document.querySelectorAll('#pseg button').forEach(b=>b.classList.toggle('on',b.dataset.p===PUR));
+  document.querySelectorAll('#pseg button').forEach(b=>b.classList.toggle('on',b.dataset.p===CH));
   $('#steps h2').textContent=isBlsMode()?'Настройки ступеней':'Настройки ступеней · '+PNAME[PUR];
   $('#resetrun').textContent=isBlsMode()?'Сбросить ступени (как рестарт пула)':'Сбросить кулдауны и карантины '+PNAME[PUR];
   document.title='Proxy Manager'+(isBlsMode()?'':' · '+PNAME[PUR]);
 }
-$('#pseg').addEventListener('click',e=>{const p=e.target.dataset.p;if(!p||p===PUR)return;
-  PUR=p;try{localStorage.setItem('blsPurpose',p)}catch(x){}
+$('#pseg').addEventListener('click',e=>{const p=e.target.dataset.p;if(!p||p===CH)return;
+  if(p==='ocr'||p===PUR){CH=p;applyPurposeUi();loadStats();return}  // OCR / возврат к текущей цели: меняется только график
+  PUR=p;CH=p;try{localStorage.setItem('blsPurpose',p)}catch(x){}
   sel.clear();cfgShown=false;S={summary:[],proxies:[],leases:[],events:[],settings:[]};
   applyPurposeUi();refresh();loadStats()});
 applyPurposeUi();

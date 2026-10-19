@@ -508,6 +508,17 @@ async def admin_state(purpose: Optional[str] = None):
 async def admin_stats(hours: int = 24, purpose: Optional[str] = None):
     """Точки для графика: успешные циклы и ошибки по часам/суткам (нужен sql/09_stats.sql)."""
     hours = max(1, min(int(hours), 336))
+    if purpose == "ocr":  # отдельный график OCR (нужен sql/18_ocr_stats.sql); аренд и Cloudflare у OCR нет
+        try:
+            rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_ocr_event_stats($1)", hours)
+        except asyncpg.UndefinedFunctionError:
+            raise HTTPException(501, "накатите sql/18_ocr_stats.sql")
+        return {
+            "hours": hours,
+            "cf": None,
+            "ocr": True,
+            "points": [{"t": r["bucket"].isoformat(), "ok": r["ok"], "err": r["err"]} for r in rows],
+        }
     pur = _purpose_arg(purpose)
     try:
         if pur:
