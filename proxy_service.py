@@ -212,7 +212,7 @@ app = FastAPI(title="bls-proxy-service", lifespan=lifespan,
 # --------------------------------------------------------------------------- #
 # Токены ботов из базы (sql/25): в кэше только SHA-256 хеши. Кэш живёт DB_TOKENS_TTL_S секунд;
 # при создании/отключении из дашборда он обновляется сразу, при неизвестном токене — не чаще раза в секунду.
-_db_tokens: dict[str, tuple[str, str]] = {}   # sha256(токен) -> (цель, имя клиента)
+_db_tokens: dict[str, tuple[str, str, Optional[list]]] = {}   # sha256(токен) -> (цель, имя клиента, пулы или None = все)
 _db_tokens_at = 0.0
 _db_tokens_try_at = 0.0
 _db_touch_at: dict[str, float] = {}
@@ -237,7 +237,8 @@ async def _refresh_db_tokens(force: bool = False) -> None:
             log.warning("bot_tokens_active failed: %s", e)
             _db_tokens_at = now
             return
-        _db_tokens = {r["token_hash"]: (r["purpose"], r["name"]) for r in rows}
+        _db_tokens = {r["token_hash"]: (r["purpose"], r["name"], (list(r.get("pools")) if r.get("pools") else None))
+                      for r in rows}
         _db_tokens_at = now
 
 
@@ -254,6 +255,7 @@ async def require_bot(request: Request, x_bot_token: str = Header(default="")) -
     got = x_bot_token.encode()
     scope = None
     client = None
+    pools_allowed = None   # None = все пулы цели (env-токены и токены без ограничения)
     for pur, tok in BOT_TOKEN_PURPOSES.items():
         if secrets.compare_digest(got, tok.encode()):
             scope = pur
@@ -270,14 +272,16 @@ async def require_bot(request: Request, x_bot_token: str = Header(default="")) -
             await _refresh_db_tokens()
             hit = _db_tokens.get(h)
         if hit is not None:
-            scope, client = hit
+            scope, client, pools_allowed = hit
             now = time.monotonic()
-            if now - _db_touch_at.get(h, 0.0) > 60:
+            last_touch = _db_touch_at.get(h)
+            if last_touch is None or now - last_touch > 60:
                 _db_touch_at[h] = now
                 asyncio.create_task(_touch_db_token(h), name="touch_bot_token")
     if scope is None:
         raise HTTPException(401, "bad bot token")
     request.state.bot_client = client
+    request.state.bot_pools = pools_allowed
     return scope
 
 
@@ -362,19 +366,35 @@ async def acquire(req: AcquireRequest, request: Request, scope: str = Depends(re
     token_client = getattr(request.state, "bot_client", None)
     if token_client:  # клиентский токен: имя задаёт сервер, подделать его в запросе нельзя
         req.client_id = token_client
-    rows = await pools["issuer"].fetch(
-        f"select * from {SCHEMA}.acquire_proxies("
-        "p_account_id := $1, p_count := $2, p_ttl_seconds := $3, "
-        "p_purpose := $4, p_client_id := $5, p_exclude := $6, p_replace := $7)",
-        req.account_id, req.count, req.ttl_seconds, req.purpose,
-        req.client_id, req.exclude, req.replace,
-    )
+    allowed_pools = getattr(request.state, "bot_pools", None)   # список пулов токена; None = все пулы цели
+    if allowed_pools:
+        # Токен ограничен пулами: выдаём только из них. Без миграции 26 не откатываемся на «все пулы»: лучше отказ.
+        try:
+            rows = await pools["issuer"].fetch(
+                f"select * from {SCHEMA}.acquire_proxies_scoped($1, $2, $3, $4, $5, $6, $7, $8)",
+                req.account_id, req.count, req.ttl_seconds, req.purpose,
+                req.client_id, req.exclude, req.replace, allowed_pools,
+            )
+        except asyncpg.UndefinedFunctionError:
+            raise HTTPException(503, "pool restriction is set for this token, but sql/26_token_pools.sql is not applied")
+    else:
+        rows = await pools["issuer"].fetch(
+            f"select * from {SCHEMA}.acquire_proxies("
+            "p_account_id := $1, p_count := $2, p_ttl_seconds := $3, "
+            "p_purpose := $4, p_client_id := $5, p_exclude := $6, p_replace := $7)",
+            req.account_id, req.count, req.ttl_seconds, req.purpose,
+            req.client_id, req.exclude, req.replace,
+        )
     # 403 на нескольких разных прокси подряд — виноват профиль браузера, а не прокси.
     reset = bool(await pools["issuer"].fetchval(
         f"select {SCHEMA}.account_needs_reset($1)", req.account_id))
     action = {"account_action": "reset_profile"} if reset else {}
     if not rows:
-        wait_s = await pools["issuer"].fetchval(f"select {SCHEMA}.next_available_in($1)", req.purpose)
+        if allowed_pools:
+            wait_s = await pools["issuer"].fetchval(
+                f"select {SCHEMA}.next_available_in_scoped($1, $2)", req.purpose, allowed_pools)
+        else:
+            wait_s = await pools["issuer"].fetchval(f"select {SCHEMA}.next_available_in($1)", req.purpose)
         # Пусто — норма для пула: ждать wait_s и повторять, аккаунт не выключать.
         return {"leases": [], "retry_after_seconds": wait_s, **action}
     return {
@@ -729,11 +749,17 @@ async def admin_stats(hours: int = 24, purpose: Optional[str] = None, minutes: O
 class BotClientCreate(BaseModel):
     purpose: str
     name: str
+    pools: Optional[list[str]] = None   # None = все пулы цели
 
 
 class BotClientAction(BaseModel):
     id: str
     enabled: Optional[bool] = None
+
+
+class BotClientPools(BaseModel):
+    id: str
+    pools: Optional[list[str]] = None   # None = все пулы цели
 
 
 def _client_uuid(raw: str) -> str:
@@ -750,6 +776,13 @@ async def admin_bot_clients():
         rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_bot_clients_list()")
     except asyncpg.UndefinedFunctionError:
         raise HTTPException(501, "накатите sql/25_bot_tokens.sql")
+    avail: dict[str, list] = {}
+    try:
+        for pur in [p for p in ALLOWED_PURPOSES if p != "ocr"]:
+            pr = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_purpose_pools($1)", pur)
+            avail[pur] = [{"pool": x["pool"], "proxies": x["proxies"], "enabled": x["enabled"]} for x in pr]
+    except asyncpg.UndefinedFunctionError:
+        avail = {}   # миграция 26 не накатана: дашборд скроет выбор пулов
     env = [{"purpose": pur, "name": None} for pur in sorted(BOT_TOKEN_PURPOSES)]
     env += [{"purpose": pur, "name": name} for pur, toks in sorted(BOT_CLIENT_TOKENS.items()) for name in sorted(toks.values())]
     return {
@@ -757,7 +790,9 @@ async def admin_bot_clients():
             "id": str(r["id"]), "purpose": r["purpose"], "name": r["name"], "hint": r["hint"], "enabled": r["enabled"],
             "created_at": r["created_at"].isoformat(),
             "last_used_at": r["last_used_at"].isoformat() if r["last_used_at"] else None,
+            "pools": (list(r.get("pools")) if r.get("pools") else None),
         } for r in rows],
+        "pools_available": avail,
         "env": env,
         "purposes": [p for p in ALLOWED_PURPOSES if p != "ocr"],
     }
@@ -773,21 +808,42 @@ async def admin_bot_client_create(req: BotClientCreate):
         raise HTTPException(400, "имя: латиница, цифры, точка, дефис, подчёркивание, до 40 знаков")
     tok = "bpm_" + secrets.token_urlsafe(32)
     try:
-        cid = await pools["admin"].fetchval(
-            f"select {SCHEMA}.admin_bot_client_create($1, $2, $3, $4)", req.purpose, name, _token_hash(tok), tok[-4:])
+        if req.pools:
+            cid = await pools["admin"].fetchval(
+                f"select {SCHEMA}.admin_bot_client_create($1, $2, $3, $4, $5)",
+                req.purpose, name, _token_hash(tok), tok[-4:], req.pools)
+        else:
+            cid = await pools["admin"].fetchval(
+                f"select {SCHEMA}.admin_bot_client_create($1, $2, $3, $4)", req.purpose, name, _token_hash(tok), tok[-4:])
+    except asyncpg.InvalidParameterValueError as e:
+        raise HTTPException(400, str(e))
     except asyncpg.UniqueViolationError:
         raise HTTPException(409, "клиент с таким именем в этой цели уже есть")
     except asyncpg.UndefinedFunctionError:
         raise HTTPException(501, "накатите sql/25_bot_tokens.sql")
     await _refresh_db_tokens(force=True)
     log.info("bot client created: %s/%s", req.purpose, name)
-    return {"id": str(cid), "purpose": req.purpose, "name": name, "token": tok}
+    return {"id": str(cid), "purpose": req.purpose, "name": name, "token": tok, "pools": req.pools or None}
 
 
 @admin.post("/bot_clients/enable")
 async def admin_bot_client_enable(req: BotClientAction):
     n = await pools["admin"].fetchval(
         f"select {SCHEMA}.admin_bot_client_set_enabled($1::uuid, $2)", _client_uuid(req.id), bool(req.enabled))
+    await _refresh_db_tokens(force=True)
+    return {"changed": n}
+
+
+@admin.post("/bot_clients/pools")
+async def admin_bot_client_pools(req: BotClientPools):
+    """Назначить токену пулы (список имён proxies.pool) или все пулы цели (pools = null)."""
+    try:
+        n = await pools["admin"].fetchval(
+            f"select {SCHEMA}.admin_bot_client_set_pools($1::uuid, $2)", _client_uuid(req.id), req.pools or None)
+    except asyncpg.InvalidParameterValueError as e:
+        raise HTTPException(400, str(e))
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/26_token_pools.sql")
     await _refresh_db_tokens(force=True)
     return {"changed": n}
 
