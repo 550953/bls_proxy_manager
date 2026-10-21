@@ -243,7 +243,7 @@ class RenewRequest(BaseModel):
 
 class ReportRequest(BaseModel):
     lease_id: str
-    event_type: str  # 'cycle_ok' | 'error'
+    event_type: str  # 'cycle_ok' | 'error' | 'info' | 'warn' (info/warn — только журнал)
     error_code: Optional[str] = None
     phase: Optional[str] = None
     latency_ms: Optional[int] = None
@@ -312,8 +312,8 @@ async def renew(req: RenewRequest, scope: str = Depends(require_bot)):
 @bot.post("/report")
 async def report(req: ReportRequest, scope: str = Depends(require_bot)):
     await _check_lease_scope(req.lease_id, scope)
-    if req.event_type not in ("cycle_ok", "error"):
-        raise HTTPException(400, "event_type must be 'cycle_ok' or 'error'")
+    if req.event_type not in ("cycle_ok", "error", "info", "warn"):
+        raise HTTPException(400, "event_type must be 'cycle_ok', 'error', 'info' or 'warn'")
     await pools["reporter"].execute(
         f"select {SCHEMA}.report_event($1::uuid, $2, $3, $4, $5, $6::jsonb)",
         req.lease_id, req.event_type, req.error_code, req.phase,
@@ -847,6 +847,10 @@ async def _schedule_fault_check(lease_id: str, error_code: Optional[str]) -> Non
     if not error_code or error_code.strip().upper() not in FAULT_CODES:
         return
     try:
+        # Проверка «прокси мёртв или сайт лёг» написана под BLS (TCP до BLS, состояние proxy_state).
+        # Для других целей решает справочник error_codes в БД, а эта проверка могла бы «простить» чужой сбой BLS.
+        if await pools["reporter"].fetchval(f"select {SCHEMA}.lease_purpose($1::uuid)", lease_id) != "bls":
+            return
         proxy_id = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_proxy($1::uuid)", lease_id)
     except Exception:
         log.exception("lease_proxy failed")
