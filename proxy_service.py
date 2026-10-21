@@ -12,6 +12,7 @@
                   $BLS_BOT_TOKEN_VISAGLOBAL   -> visaglobal   (не задан -> цель выключена)
                   $BLS_BOT_CLIENTS_VISAGLOBAL -> имя1=токен1,имя2=токен2: токен клиента внутри цели;
                                                  клиент видит и меняет только свои аренды (client_id задаёт сервер)
+                  токены из дашборда (карточка «Токены ботов», sql/25) -> то же, что BLS_BOT_CLIENTS_*, но без правки env
                 токен одной цели не может брать/продлевать/закрывать аренды другой (403).
                 Отозвать цель = убрать/сменить её токен в env и перезапустить сервис.
   * OCR       — заголовок  X-Bot-Token: $BLS_BOT_TOKEN_OCR (только /ocr/pool и /ocr/report;
@@ -26,12 +27,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
 import time
+import uuid as _uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -207,9 +210,47 @@ app = FastAPI(title="bls-proxy-service", lifespan=lifespan,
 # --------------------------------------------------------------------------- #
 # Авторизация
 # --------------------------------------------------------------------------- #
-def require_bot(request: Request, x_bot_token: str = Header(default="")) -> str:
-    """Возвращает цель (purpose), к которой привязан токен. Перебираем все токены без раннего выхода.
-    Если токен принадлежит конкретному клиенту, его имя кладётся в request.state.bot_client."""
+# Токены ботов из базы (sql/25): в кэше только SHA-256 хеши. Кэш живёт DB_TOKENS_TTL_S секунд;
+# при создании/отключении из дашборда он обновляется сразу, при неизвестном токене — не чаще раза в секунду.
+_db_tokens: dict[str, tuple[str, str]] = {}   # sha256(токен) -> (цель, имя клиента)
+_db_tokens_at = 0.0
+_db_tokens_try_at = 0.0
+_db_touch_at: dict[str, float] = {}
+DB_TOKENS_TTL_S = 15.0
+_db_tokens_lock = asyncio.Lock()
+
+
+def _token_hash(tok: str) -> str:
+    return hashlib.sha256(tok.encode()).hexdigest()
+
+
+async def _refresh_db_tokens(force: bool = False) -> None:
+    global _db_tokens, _db_tokens_at, _db_tokens_try_at
+    async with _db_tokens_lock:
+        now = time.monotonic()
+        if not force and now - _db_tokens_try_at < 1.0:
+            return
+        _db_tokens_try_at = now
+        try:
+            rows = await pools["reporter"].fetch(f"select * from {SCHEMA}.bot_tokens_active()")
+        except Exception as e:  # sql/25 не накатан или база недоступна: остаёмся на старом кэше и env-токенах
+            log.warning("bot_tokens_active failed: %s", e)
+            _db_tokens_at = now
+            return
+        _db_tokens = {r["token_hash"]: (r["purpose"], r["name"]) for r in rows}
+        _db_tokens_at = now
+
+
+async def _touch_db_token(h: str) -> None:
+    try:
+        await pools["reporter"].execute(f"select {SCHEMA}.bot_token_touch($1)", h)
+    except Exception:
+        pass
+
+
+async def require_bot(request: Request, x_bot_token: str = Header(default="")) -> str:
+    """Возвращает цель (purpose), к которой привязан токен. Перебираем env-токены без раннего выхода,
+    затем токены из базы. Для клиентского токена имя клиента кладётся в request.state.bot_client."""
     got = x_bot_token.encode()
     scope = None
     client = None
@@ -220,6 +261,20 @@ def require_bot(request: Request, x_bot_token: str = Header(default="")) -> str:
         for tok, name in toks.items():
             if secrets.compare_digest(got, tok.encode()):
                 scope, client = pur, name
+    if scope is None and x_bot_token:
+        h = _token_hash(x_bot_token)
+        if time.monotonic() - _db_tokens_at > DB_TOKENS_TTL_S:
+            await _refresh_db_tokens()
+        hit = _db_tokens.get(h)
+        if hit is None:  # возможно, токен создан только что
+            await _refresh_db_tokens()
+            hit = _db_tokens.get(h)
+        if hit is not None:
+            scope, client = hit
+            now = time.monotonic()
+            if now - _db_touch_at.get(h, 0.0) > 60:
+                _db_touch_at[h] = now
+                asyncio.create_task(_touch_db_token(h), name="touch_bot_token")
     if scope is None:
         raise HTTPException(401, "bad bot token")
     request.state.bot_client = client
@@ -669,6 +724,79 @@ async def admin_stats(hours: int = 24, purpose: Optional[str] = None, minutes: O
         "cf": cf,
         "points": [{"t": r["bucket"].isoformat(), "ok": r["ok"], "err": r["err"]} for r in rows],
     }
+
+
+class BotClientCreate(BaseModel):
+    purpose: str
+    name: str
+
+
+class BotClientAction(BaseModel):
+    id: str
+    enabled: Optional[bool] = None
+
+
+def _client_uuid(raw: str) -> str:
+    try:
+        return str(_uuid.UUID(raw))
+    except ValueError:
+        raise HTTPException(400, "bad id")
+
+
+@admin.get("/bot_clients")
+async def admin_bot_clients():
+    """Токены ботов: из базы (управляются здесь) и из env (только показ, без самих токенов)."""
+    try:
+        rows = await pools["admin"].fetch(f"select * from {SCHEMA}.admin_bot_clients_list()")
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/25_bot_tokens.sql")
+    env = [{"purpose": pur, "name": None} for pur in sorted(BOT_TOKEN_PURPOSES)]
+    env += [{"purpose": pur, "name": name} for pur, toks in sorted(BOT_CLIENT_TOKENS.items()) for name in sorted(toks.values())]
+    return {
+        "clients": [{
+            "id": str(r["id"]), "purpose": r["purpose"], "name": r["name"], "hint": r["hint"], "enabled": r["enabled"],
+            "created_at": r["created_at"].isoformat(),
+            "last_used_at": r["last_used_at"].isoformat() if r["last_used_at"] else None,
+        } for r in rows],
+        "env": env,
+        "purposes": [p for p in ALLOWED_PURPOSES if p != "ocr"],
+    }
+
+
+@admin.post("/bot_clients")
+async def admin_bot_client_create(req: BotClientCreate):
+    """Создать токен клиента. Сам токен возвращается один раз и нигде не хранится (в базе только хеш)."""
+    if req.purpose not in ALLOWED_PURPOSES or req.purpose == "ocr":
+        raise HTTPException(400, "bad purpose")
+    name = req.name.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
+        raise HTTPException(400, "имя: латиница, цифры, точка, дефис, подчёркивание, до 40 знаков")
+    tok = "bpm_" + secrets.token_urlsafe(32)
+    try:
+        cid = await pools["admin"].fetchval(
+            f"select {SCHEMA}.admin_bot_client_create($1, $2, $3, $4)", req.purpose, name, _token_hash(tok), tok[-4:])
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(409, "клиент с таким именем в этой цели уже есть")
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/25_bot_tokens.sql")
+    await _refresh_db_tokens(force=True)
+    log.info("bot client created: %s/%s", req.purpose, name)
+    return {"id": str(cid), "purpose": req.purpose, "name": name, "token": tok}
+
+
+@admin.post("/bot_clients/enable")
+async def admin_bot_client_enable(req: BotClientAction):
+    n = await pools["admin"].fetchval(
+        f"select {SCHEMA}.admin_bot_client_set_enabled($1::uuid, $2)", _client_uuid(req.id), bool(req.enabled))
+    await _refresh_db_tokens(force=True)
+    return {"changed": n}
+
+
+@admin.post("/bot_clients/delete")
+async def admin_bot_client_delete(req: BotClientAction):
+    n = await pools["admin"].fetchval(f"select {SCHEMA}.admin_bot_client_delete($1::uuid)", _client_uuid(req.id))
+    await _refresh_db_tokens(force=True)
+    return {"changed": n}
 
 
 @admin.get("/visa_report")

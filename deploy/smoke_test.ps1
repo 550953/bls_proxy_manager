@@ -1,21 +1,29 @@
-# smoke_test.ps1 - quick end-to-end check of the VisaGlobal flow (blocks 1-5).
+# smoke_test.ps1 - one-click end-to-end check of the VisaGlobal flow.
+# Just double-click run_test.bat (or run this file). It asks for the bot token, sends one request of every
+# kind, prints PASS/FAIL and saves the whole output to smoke_result.txt - send that file to the developer.
 # Works in Windows PowerShell 5.1 and PowerShell 7. ASCII only on purpose.
 #
-# Example:
-#   .\smoke_test.ps1 -VisaToken "<BLS_BOT_TOKEN_VISAGLOBAL>"
-#   .\smoke_test.ps1 -VisaToken "<token>" -ClientTokenA "<alice token>" -ClientTokenB "<bob token>"
-#
 # Default run sends only SAFE codes: nothing here puts an IP into a long cooldown.
-# Every lease is released at the end (normal release = 60 s cooldown for that IP).
-# -IncludeIpBan adds CF_BLOCK twice with different profiles: this DOES cool the IP down (confirmed block).
+# The lease is released at the end (normal release = 60 s pause for that IP).
+# Optional switch -IncludeIpBan adds CF_BLOCK with different profiles: this DOES cool the IP down.
 param(
     [string]$BaseUrl = "https://bls-proxy.shikinn.com",
-    [Parameter(Mandatory = $true)][string]$VisaToken,   # token of purpose visaglobal (or client A token)
-    [string]$ClientTokenA = "",                          # optional: per-client token, owner of the lease
-    [string]$ClientTokenB = "",                          # optional: other client, must get 403 on A's lease
+    [string]$VisaToken = "",        # token of purpose visaglobal; if empty the script asks for it
+    [string]$ClientTokenA = "",     # optional, normally not needed
+    [string]$ClientTokenB = "",     # optional: second client token for the isolation test; asked interactively
     [string]$AccountId = "smoke-test-001",
     [switch]$IncludeIpBan
 )
+try { Start-Transcript -Path (Join-Path $PSScriptRoot "smoke_result.txt") -Force | Out-Null } catch { }
+Write-Host "VisaGlobal smoke test -> $BaseUrl" -ForegroundColor Cyan
+if (-not $VisaToken -and -not $ClientTokenA) {
+    $VisaToken = Read-Host "Paste the bot token for VisaGlobal and press Enter"
+}
+if (-not $VisaToken -and -not $ClientTokenA) { Write-Host "No token given, stopping." -ForegroundColor Red; try { Stop-Transcript | Out-Null } catch { }; exit 1 }
+if (-not $ClientTokenB -and $PSBoundParameters.Count -le 1) {
+    $ClientTokenB = Read-Host "Optional: paste a token of ANOTHER client created in the dashboard (Bot tokens card) to test isolation, or just press Enter to skip"
+    if ($ClientTokenB -and -not $ClientTokenA) { $ClientTokenA = $VisaToken }
+}
 $ErrorActionPreference = "Stop"
 $BaseUrl = $BaseUrl.TrimEnd("/")
 $script:Fails = 0
@@ -162,4 +170,5 @@ Check "bad token gets 401" ($r.Status -eq 401) "$($r.Status)"
 Write-Host ""
 Write-Host "================ SUMMARY ================" -ForegroundColor Cyan
 $script:Results | Format-Table -AutoSize
-if ($script:Fails -eq 0) { Write-Host "ALL CHECKS PASSED" -ForegroundColor Green } else { Write-Host "$($script:Fails) CHECK(S) FAILED - send me the output above" -ForegroundColor Red }
+if ($script:Fails -eq 0) { Write-Host "ALL CHECKS PASSED" -ForegroundColor Green } else { Write-Host "$($script:Fails) CHECK(S) FAILED - send smoke_result.txt (it is next to this script)" -ForegroundColor Red }
+try { Stop-Transcript | Out-Null } catch { }

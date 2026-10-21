@@ -128,6 +128,11 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 .dtf .sep{grid-column:1/-1;border-top:1px solid var(--ln);margin:4px 0}
 .cmsg{color:var(--mut);padding:30px 8px;text-align:center;font-size:13px}
 .card[hidden]{display:none}
+.tokbox{margin:10px 14px;padding:12px 14px;border:1px solid var(--acc);border-radius:12px;background:var(--accbg)}
+.tokbox code{display:block;margin:8px 0;padding:8px 10px;border-radius:8px;background:var(--card);font-size:13px;word-break:break-all;user-select:all}
+.tokbox[hidden]{display:none}
+#tokhelp{color:var(--mut);font-size:12.5px;margin:0 14px 4px;line-height:1.5}
+#tokform{padding:0 14px}
 .vr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;padding:12px 14px 16px}
 .vr h3{margin:0 0 6px;font-size:13px;color:var(--fg)}
 .vr .sc{max-height:300px;overflow:auto;border:1px solid var(--ln2);border-radius:10px}
@@ -217,6 +222,23 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 <section class="card" id="vrep" hidden>
   <div class="hd"><h2>Отчёт VisaGlobal</h2><div class="chips" id="vrchips"></div></div>
   <div id="vrbody"><div class="cmsg">загрузка…</div></div>
+</section>
+
+<section class="card" id="toks">
+  <div class="hd"><h2>Токены ботов</h2><div class="chips" id="tokchips"></div></div>
+  <p id="tokhelp">Бот передаёт токен в заголовке <code>X-Bot-Token</code>. Создайте отдельный токен каждому клиенту: сервер сам подставит его имя в аренды, и клиент не сможет брать, закрывать или отчитываться по чужим арендам. Отключить или удалить токен можно здесь, перезапуск сервера и правка env не нужны. Токены из настроек сервера (env) продолжают работать, их список показан ниже.</p>
+  <div class="row" id="tokform">
+    <input id="tokname" placeholder="имя клиента, например north-clicker" size="30" maxlength="40" autocomplete="off">
+    <select id="tokpur" title="для какой цели токен"></select>
+    <button class="p" id="tokadd">Создать токен</button>
+  </div>
+  <div class="tokbox" id="tokbox" hidden>
+    <b>Токен создан. Он показывается один раз, скопируйте его сейчас:</b>
+    <code id="tokval"></code>
+    <button id="tokcopy">Копировать</button> <button id="tokclose">Скрыть</button>
+    <div id="tokcmt" style="margin-top:6px;color:var(--mut);font-size:12px"></div>
+  </div>
+  <div class="sc"><table id="tokt"></table></div>
 </section>
 
 <section class="card" id="pools">
@@ -553,6 +575,44 @@ async function loadVr(){
   catch(e){const m=String(e.message);$('#vrchips').innerHTML='';
     $('#vrbody').innerHTML='<div class="cmsg">'+(m.startsWith('501')?'Накатите <code>sql/24_visaglobal_report_owner.sql</code> в Supabase и обновите сервис.':'Не удалось загрузить: '+esc(m.slice(0,160)))+'</div>'}
 }
+// ---------- токены ботов (sql/25_bot_tokens.sql) ----------
+const dtl=v=>v?new Date(v).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+let TOKB=null;
+function drawTok(d){
+  const cl=d.clients||[],env=d.env||[];
+  const sel=$('#tokpur');if(!sel.options.length)sel.innerHTML=(d.purposes||[]).map(x=>`<option value="${esc(x)}"${x===PUR?' selected':''}>${esc(PNAME[x]||x)}</option>`).join('');
+  $('#tokchips').innerHTML=`<span class="chip g">из дашборда <b>${nfmt(cl.filter(c=>c.enabled).length)}</b></span><span class="chip">из env сервера <b>${nfmt(env.length)}</b></span>`;
+  const rows=cl.map(c=>`<tr><td>${pBadge(c.purpose)}</td><td>${esc(c.name)}</td><td><code>…${esc(c.hint)}</code></td><td>дашборд</td>`
+    +`<td>${c.enabled?'<span class="bdg" style="background:var(--okbg);color:var(--ok)">активен</span>':'<span class="bdg" style="background:var(--ln2);color:var(--mut)">отключён</span>'}</td>`
+    +`<td>${dtl(c.created_at)}</td><td>${dtl(c.last_used_at)}</td>`
+    +`<td><button data-a="${c.enabled?'off':'on'}" data-id="${esc(c.id)}">${c.enabled?'Отключить':'Включить'}</button> <button class="d" data-a="del" data-id="${esc(c.id)}" data-n="${esc(c.name)}">Удалить</button></td></tr>`);
+  const erows=env.map(e=>`<tr><td>${pBadge(e.purpose)}</td><td>${e.name?esc(e.name):'<i>общий токен цели</i>'}</td><td>—</td><td>env сервера</td><td><span class="bdg" style="background:var(--okbg);color:var(--ok)">активен</span></td><td>—</td><td>—</td><td><small style="color:var(--mut)">меняется в настройках хостинга</small></td></tr>`);
+  $('#tokt').innerHTML='<thead><tr><th>цель</th><th>имя</th><th>токен</th><th>источник</th><th>статус</th><th>создан</th><th>использован</th><th></th></tr></thead><tbody>'+rows.concat(erows).join('')+'</tbody>';
+}
+async function loadTok(){
+  try{drawTok(await api('/admin/api/bot_clients'))}
+  catch(e){const m=String(e.message);$('#tokchips').innerHTML='';
+    $('#tokt').innerHTML='<tbody><tr><td class="cmsg">'+(m.startsWith('501')?'Накатите <code>sql/25_bot_tokens.sql</code> в Supabase и обновите сервис.':'Не удалось загрузить: '+esc(m.slice(0,160)))+'</td></tr></tbody>'}
+}
+$('#tokadd').onclick=async()=>{
+  const name=$('#tokname').value.trim();
+  if(!name){$('#err').textContent='Введите имя клиента';return}
+  try{const r=await api('/admin/api/bot_clients',{name,purpose:$('#tokpur').value});
+    $('#err').textContent='';$('#tokname').value='';
+    $('#tokval').textContent=r.token;TOKB=r.token;
+    $('#tokcmt').textContent='Клиент «'+r.name+'», цель '+(PNAME[r.purpose]||r.purpose)+'. Вставьте токен в бота как X-Bot-Token. Потом его уже не показать, только создать новый.';
+    $('#tokbox').hidden=false;await loadTok()}
+  catch(e){$('#err').textContent='Ошибка: '+e.message}};
+$('#tokcopy').onclick=async()=>{try{await navigator.clipboard.writeText(TOKB||'');$('#tokcopy').textContent='Скопировано'}catch(e){const r=document.createRange();r.selectNodeContents($('#tokval'));const sl=getSelection();sl.removeAllRanges();sl.addRange(r);$('#tokcopy').textContent='Выделено, нажмите Ctrl+C'}};
+$('#tokclose').onclick=()=>{$('#tokbox').hidden=true;$('#tokval').textContent='';TOKB=null;$('#tokcopy').textContent='Копировать'};
+$('#tokt').addEventListener('click',async e=>{const b=e.target.closest('button[data-a]');if(!b)return;
+  const a=b.dataset.a,id=b.dataset.id;
+  try{
+    if(a==='del'){if(!confirm('Удалить токен клиента «'+b.dataset.n+'»? Бот с этим токеном сразу перестанет работать.'))return;await api('/admin/api/bot_clients/delete',{id})}
+    else await api('/admin/api/bot_clients/enable',{id,enabled:a==='on'});
+    $('#err').textContent='';await loadTok()}
+  catch(x){$('#err').textContent='Ошибка: '+x.message}});
+
 applyPurposeUi();
-refresh();loadStats();loadDt();loadVr();setInterval(refresh,10000);setInterval(loadStats,10000);setInterval(loadDt,15000);setInterval(loadVr,15000);
+refresh();loadStats();loadDt();loadVr();loadTok();setInterval(loadTok,30000);setInterval(refresh,10000);setInterval(loadStats,10000);setInterval(loadDt,15000);setInterval(loadVr,15000);
 </script></body></html>
