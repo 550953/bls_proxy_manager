@@ -10,6 +10,8 @@
   * боты      — заголовок  X-Bot-Token. Токен привязан к цели (purpose):
                   $BLS_BOT_TOKEN              -> bls
                   $BLS_BOT_TOKEN_VISAGLOBAL   -> visaglobal   (не задан -> цель выключена)
+                  $BLS_BOT_CLIENTS_VISAGLOBAL -> имя1=токен1,имя2=токен2: токен клиента внутри цели;
+                                                 клиент видит и меняет только свои аренды (client_id задаёт сервер)
                 токен одной цели не может брать/продлевать/закрывать аренды другой (403).
                 Отозвать цель = убрать/сменить её токен в env и перезапустить сервис.
   * OCR       — заголовок  X-Bot-Token: $BLS_BOT_TOKEN_OCR (только /ocr/pool и /ocr/report;
@@ -37,7 +39,7 @@ from urllib.parse import quote
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
@@ -63,6 +65,9 @@ BOT_TOKEN_OCR = os.environ.get("BLS_BOT_TOKEN_OCR", "")  # токен OCR-сер
 # Токены ботов по целям: BLS_BOT_TOKEN -> bls, BLS_BOT_TOKEN_<ЦЕЛЬ> -> эта цель.
 # Новая цель = добавить её в ALLOWED_PURPOSES и задать BLS_BOT_TOKEN_<ЦЕЛЬ> (ocr — отдельный API).
 BOT_TOKEN_PURPOSES = {"bls": BOT_TOKEN}
+# Токены отдельных клиентов внутри цели: BLS_BOT_CLIENTS_<ЦЕЛЬ>="имя1=токен1,имя2=токен2".
+# Токен клиента = доступ к цели + имя клиента: client_id в аренде задаёт сервер, чужую аренду клиент не тронет.
+BOT_CLIENT_TOKENS: dict[str, dict[str, str]] = {}   # цель -> {токен: имя клиента}
 OCR_REFRESH_S = int(os.environ.get("BLS_OCR_REFRESH_S", "60"))  # как часто OCR перечитывает пул
 
 DB_HOST = os.environ.get("BLS_DB_HOST", "")
@@ -117,11 +122,24 @@ def _load_purpose_tokens() -> None:
         tok = os.environ.get(f"BLS_BOT_TOKEN_{pur.upper()}", "").strip()
         if tok:
             BOT_TOKEN_PURPOSES[pur] = tok
+    for pur in ALLOWED_PURPOSES:
+        raw = os.environ.get(f"BLS_BOT_CLIENTS_{pur.upper()}", "").strip()
+        for item in filter(None, (x.strip() for x in raw.split(","))):
+            name, _, tok = item.partition("=")
+            name, tok = name.strip(), tok.strip()
+            if not name or not tok:
+                raise SystemExit(f"BLS_BOT_CLIENTS_{pur.upper()}: ожидается имя=токен, получено '{item[:20]}'")
+            BOT_CLIENT_TOKENS.setdefault(pur, {})[tok] = name
     seen: dict[str, str] = {}
     for pur, tok in BOT_TOKEN_PURPOSES.items():
         if tok in seen:
             raise SystemExit(f"Токены целей '{seen[tok]}' и '{pur}' совпадают — задайте разные")
         seen[tok] = pur
+    for pur, toks in BOT_CLIENT_TOKENS.items():
+        for tok, name in toks.items():
+            if tok in seen:
+                raise SystemExit(f"Токен клиента '{name}' ({pur}) совпадает с другим токеном — задайте разные")
+            seen[tok] = pur
     if BOT_TOKEN_OCR and BOT_TOKEN_OCR in seen:
         raise SystemExit(f"BLS_BOT_TOKEN_OCR совпадает с токеном цели '{seen[BOT_TOKEN_OCR]}'")
 
@@ -189,26 +207,38 @@ app = FastAPI(title="bls-proxy-service", lifespan=lifespan,
 # --------------------------------------------------------------------------- #
 # Авторизация
 # --------------------------------------------------------------------------- #
-def require_bot(x_bot_token: str = Header(default="")) -> str:
-    """Возвращает цель (purpose), к которой привязан токен. Перебираем все токены без раннего выхода."""
+def require_bot(request: Request, x_bot_token: str = Header(default="")) -> str:
+    """Возвращает цель (purpose), к которой привязан токен. Перебираем все токены без раннего выхода.
+    Если токен принадлежит конкретному клиенту, его имя кладётся в request.state.bot_client."""
     got = x_bot_token.encode()
     scope = None
+    client = None
     for pur, tok in BOT_TOKEN_PURPOSES.items():
         if secrets.compare_digest(got, tok.encode()):
             scope = pur
+    for pur, toks in BOT_CLIENT_TOKENS.items():
+        for tok, name in toks.items():
+            if secrets.compare_digest(got, tok.encode()):
+                scope, client = pur, name
     if scope is None:
         raise HTTPException(401, "bad bot token")
+    request.state.bot_client = client
     return scope
 
 
-async def _check_lease_scope(lease_id: str, scope: str) -> None:
-    """Аренда должна принадлежать цели токена. Неизвестная аренда — не наша забота (дальше ответит БД)."""
+async def _check_lease_scope(lease_id: str, scope: str, client: Optional[str] = None) -> None:
+    """Аренда должна принадлежать цели токена, а при клиентском токене ещё и этому клиенту.
+    Неизвестная аренда — не наша забота (дальше ответит БД)."""
     try:
         pur = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_purpose($1::uuid)", lease_id)
+        owner = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_owner($1::uuid)", lease_id) if client else None
     except asyncpg.PostgresError:
         raise HTTPException(400, "bad lease_id")
     if pur is not None and pur != scope:
         raise HTTPException(403, f"token scope '{scope}' cannot touch '{pur}' lease")
+    if client and owner and owner != client:
+        log.warning("client '%s' tried to touch lease %s owned by '%s'", client, lease_id, owner)
+        raise HTTPException(403, "lease belongs to another client")
 
 
 def require_ocr(x_bot_token: str = Header(default="")) -> None:
@@ -271,9 +301,12 @@ bot = APIRouter(dependencies=[Depends(require_bot)])
 
 
 @bot.post("/acquire")
-async def acquire(req: AcquireRequest, scope: str = Depends(require_bot)):
+async def acquire(req: AcquireRequest, request: Request, scope: str = Depends(require_bot)):
     if req.purpose != scope:
         raise HTTPException(403, f"token scope '{scope}' cannot acquire purpose '{req.purpose}'")
+    token_client = getattr(request.state, "bot_client", None)
+    if token_client:  # клиентский токен: имя задаёт сервер, подделать его в запросе нельзя
+        req.client_id = token_client
     rows = await pools["issuer"].fetch(
         f"select * from {SCHEMA}.acquire_proxies("
         "p_account_id := $1, p_count := $2, p_ttl_seconds := $3, "
@@ -308,8 +341,8 @@ async def acquire(req: AcquireRequest, scope: str = Depends(require_bot)):
 
 
 @bot.post("/renew")
-async def renew(req: RenewRequest, scope: str = Depends(require_bot)):
-    await _check_lease_scope(req.lease_id, scope)
+async def renew(req: RenewRequest, request: Request, scope: str = Depends(require_bot)):
+    await _check_lease_scope(req.lease_id, scope, getattr(request.state, "bot_client", None))
     until = await pools["issuer"].fetchval(
         f"select {SCHEMA}.renew_lease($1::uuid, $2)", req.lease_id, req.ttl_seconds
     )
@@ -333,8 +366,8 @@ async def _lease_verdict(lease_id: str) -> dict:
 
 
 @bot.post("/report")
-async def report(req: ReportRequest, scope: str = Depends(require_bot)):
-    await _check_lease_scope(req.lease_id, scope)
+async def report(req: ReportRequest, request: Request, scope: str = Depends(require_bot)):
+    await _check_lease_scope(req.lease_id, scope, getattr(request.state, "bot_client", None))
     if req.event_type not in ("cycle_ok", "error", "info", "warn"):
         raise HTTPException(400, "event_type must be 'cycle_ok', 'error', 'info' or 'warn'")
     await pools["reporter"].execute(
@@ -350,8 +383,8 @@ async def report(req: ReportRequest, scope: str = Depends(require_bot)):
 
 
 @bot.post("/release")
-async def release(req: ReleaseRequest, scope: str = Depends(require_bot)):
-    await _check_lease_scope(req.lease_id, scope)
+async def release(req: ReleaseRequest, request: Request, scope: str = Depends(require_bot)):
+    await _check_lease_scope(req.lease_id, scope, getattr(request.state, "bot_client", None))
     await pools["reporter"].execute(
         f"select {SCHEMA}.release_lease($1::uuid, $2, $3, $4, $5::jsonb)",
         req.lease_id, req.reason, req.error_code, req.phase, json.dumps(req.detail),
@@ -636,6 +669,18 @@ async def admin_stats(hours: int = 24, purpose: Optional[str] = None, minutes: O
         "cf": cf,
         "points": [{"t": r["bucket"].isoformat(), "ok": r["ok"], "err": r["err"]} for r in rows],
     }
+
+
+@admin.get("/visa_report")
+async def admin_visa_report(hours: int = 24, purpose: Optional[str] = None):
+    """Отчёт для дашборда: причины возвратов, успешность по IP и аккаунтам, лента UNKNOWN, клиенты (нужен sql/24)."""
+    hours = max(1, min(int(hours), 336))
+    pur = _purpose_arg(purpose) or "visaglobal"
+    try:
+        raw = await pools["admin"].fetchval(f"select {SCHEMA}.admin_visa_report($1, $2)", pur, hours)
+    except asyncpg.UndefinedFunctionError:
+        raise HTTPException(501, "накатите sql/24_visaglobal_report_owner.sql")
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 @admin.get("/dt_funnel")

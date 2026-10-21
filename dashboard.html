@@ -127,6 +127,14 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 .dtf .vl{color:var(--mut);text-align:right;white-space:nowrap}.dtf .vl b{color:var(--fg)}
 .dtf .sep{grid-column:1/-1;border-top:1px solid var(--ln);margin:4px 0}
 .cmsg{color:var(--mut);padding:30px 8px;text-align:center;font-size:13px}
+.card[hidden]{display:none}
+.vr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;padding:12px 14px 16px}
+.vr h3{margin:0 0 6px;font-size:13px;color:var(--fg)}
+.vr .sc{max-height:300px;overflow:auto;border:1px solid var(--ln2);border-radius:10px}
+.vr .wide{grid-column:1/-1}
+.vr .flag td{color:var(--bad)}
+.vr small.mut{color:var(--mut);font-size:11px}
+@media(max-width:900px){.vr{grid-template-columns:minmax(0,1fr)}}
 
 .duo{display:grid;grid-template-columns:minmax(360px,5fr) 7fr;gap:18px;margin-bottom:18px;align-items:stretch}
 .duo>.card{margin-bottom:0;display:flex;flex-direction:column;min-width:0}
@@ -204,6 +212,11 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
 <section class="card" id="dtf">
   <div class="hd"><h2>Воронка Date/Time</h2><div class="chips" id="dtchips"></div></div>
   <div class="bd"><div id="dtbody"><div class="cmsg">загрузка…</div></div></div>
+</section>
+
+<section class="card" id="vrep" hidden>
+  <div class="hd"><h2>Отчёт VisaGlobal</h2><div class="chips" id="vrchips"></div></div>
+  <div id="vrbody"><div class="cmsg">загрузка…</div></div>
 </section>
 
 <section class="card" id="pools">
@@ -456,7 +469,7 @@ async function loadStats(){
     $('#chart').innerHTML='<div class="cmsg">'+(m.startsWith('501')||m.startsWith('404')?(statM?'Для мелких диапазонов накатите <code>sql/20_chart_fine.sql</code> в Supabase и обновите сервис.':'График появится после установки <code>sql/09_stats.sql</code> в Supabase и обновления сервиса.'):'Не удалось загрузить статистику: '+esc(m.slice(0,160)))+'</div>'}
 }
 $('#seg').addEventListener('click',e=>{const h=e.target.dataset.h,m=e.target.dataset.m;if(!h&&!m)return;statM=m?+m:0;if(h)statH=+h;
-  document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats();loadDt()});
+  document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b===e.target));loadStats();loadDt();loadVr()});
 function applyPurposeUi(){
   document.querySelectorAll('#pseg button').forEach(b=>b.classList.toggle('on',b.dataset.p===CH));
   $('#steps h2').textContent=isBlsMode()?'Настройки ступеней':'Настройки ступеней · '+PNAME[PUR];
@@ -464,10 +477,10 @@ function applyPurposeUi(){
   document.title='Proxy Manager'+(isBlsMode()?'':' · '+PNAME[PUR]);
 }
 $('#pseg').addEventListener('click',e=>{const p=e.target.dataset.p;if(!p||p===CH)return;
-  if(p==='ocr'||p===PUR){CH=p;applyPurposeUi();loadStats();loadDt();return}  // OCR / возврат к текущей цели: меняется только график
+  if(p==='ocr'||p===PUR){CH=p;applyPurposeUi();loadStats();loadDt();loadVr();return}  // OCR / возврат к текущей цели: меняется только график
   PUR=p;CH=p;try{localStorage.setItem('blsPurpose',p)}catch(x){}
   sel.clear();cfgShown=false;S={summary:[],proxies:[],leases:[],events:[],settings:[]};
-  applyPurposeUi();refresh();loadStats();loadDt()});
+  applyPurposeUi();refresh();loadStats();loadDt();loadVr()});
 
 // ---------- воронка Date/Time (sql/21_dt_funnel.sql) ----------
 const DT=[
@@ -507,6 +520,39 @@ async function loadDt(){
   catch(e){const m=String(e.message);$('#dtchips').innerHTML='';
     $('#dtbody').innerHTML='<div class="cmsg">'+(m.startsWith('501')?'Накатите <code>sql/21_dt_funnel.sql</code> в Supabase и обновите сервис.':'Не удалось загрузить: '+esc(m.slice(0,160)))+'</div>'}
 }
+// ---------- отчёт VisaGlobal (sql/24_visaglobal_report_owner.sql) ----------
+const VR_BLAME={ip:'IP',profile:'профиль',site:'сайт',account:'аккаунт',provider:'провайдер',mail:'почта'};
+const pctf=v=>v==null?'—':(100*v).toFixed(1).replace('.',',')+'%';
+function vrTable(head,rows,cls){return '<div class="sc"><table><thead><tr>'+head.map(h=>`<th${h[1]?' class="num"':''}>${esc(h[0])}</th>`).join('')+'</tr></thead><tbody>'
+  +(rows.length?rows.join(''):`<tr><td colspan="${head.length}" class="cmsg">нет данных</td></tr>`)+'</tbody></table></div>'}
+function drawVr(d){
+  const rs=d.reasons||[],ips=d.ips||[],ac=d.accounts||[],un=d.unknown||[],cl=d.clients||[];
+  const ok=ips.reduce((a,r)=>a+r.ok,0),er=ips.reduce((a,r)=>a+r.err,0),fl=cl.filter(c=>c.flagged).length;
+  $('#vrchips').innerHTML=`<span class="chip g">cycle_ok <b>${nfmt(ok)}</b></span><span class="chip r">аренд с ошибкой <b>${nfmt(er)}</b></span>`
+    +`<span class="chip${un.length?' w':''}" title="Коды, которых нет в справочнике: очередь на добавление">UNKNOWN <b>${nfmt(un.length)}</b></span>`
+    +`<span class="chip${fl?' r':''}" title="Клиенты с долей «плохой IP» выше нормы">клиентов на проверку <b>${nfmt(fl)}</b></span>`;
+  const T=(h,r)=>vrTable(h,r);
+  $('#vrbody').innerHTML='<div class="vr">'
+   +'<div><h3>Топ причин <small class="mut">аренд с кодом</small></h3>'+T([['код'],['чья вина'],['1 ч',1],['24 ч',1],['7 дней',1]],
+      rs.map(r=>`<tr><td>${esc(r.code)}</td><td>${esc(VR_BLAME[r.blame]||r.blame||'—')}</td><td class="num">${nfmt(r.n_1h)}</td><td class="num">${nfmt(r.n_24h)}</td><td class="num">${nfmt(r.n_7d)}</td></tr>`))+'</div>'
+   +'<div><h3>Клиенты <small class="mut">доля аренд с ошибкой «вина IP», среднее '+pctf(d.avg_bad_ip_share)+'</small></h3>'+T([['клиент'],['аренд',1],['плохой IP',1],['доля',1],['']],
+      cl.map(c=>`<tr class="${c.flagged?'flag':''}"><td>${esc(c.client)}</td><td class="num">${nfmt(c.leases)}</td><td class="num">${nfmt(c.bad_ip)}</td><td class="num">${pctf(c.share)}</td><td>${c.flagged?'проверить':''}</td></tr>`))+'</div>'
+   +'<div><h3>Успешность по IP</h3>'+T([['IP'],['ok',1],['ошибок',1],['последний код']],
+      ips.map(r=>`<tr><td>${esc(r.addr||r.proxy_id)}</td><td class="num">${nfmt(r.ok)}</td><td class="num">${nfmt(r.err)}</td><td>${esc(r.last_code||'')}</td></tr>`))+'</div>'
+   +'<div><h3>Успешность по аккаунту</h3>'+T([['аккаунт'],['ok',1],['ошибок',1],['последний код']],
+      ac.map(r=>`<tr><td>${esc(r.account_id)}</td><td class="num">${nfmt(r.ok)}</td><td class="num">${nfmt(r.err)}</td><td>${esc(r.last_code||'')}</td></tr>`))+'</div>'
+   +'<div class="wide"><h3>Лента UNKNOWN <small class="mut">очередь на добавление новых кодов</small></h3>'+T([['время'],['аккаунт'],['фаза'],['исходный код'],['статус'],['причина'],['detail']],
+      un.map(r=>`<tr><td>${esc(new Date(r.t).toLocaleString('ru-RU'))}</td><td>${esc(r.account_id||'')}</td><td>${esc(r.phase||'')}</td><td>${esc(r.raw_code||'')}</td><td>${esc(r.status||'')}</td><td>${esc(r.reason||'')}</td><td title="${esc(r.detail||'')}">${esc((r.detail||'').slice(0,60))}</td></tr>`))+'</div>'
+   +'</div>';
+}
+async function loadVr(){
+  const box=$('#vrep');
+  if(CH!=='visaglobal'){box.hidden=true;return}
+  box.hidden=false;
+  try{drawVr(await api('/admin/api/visa_report?purpose=visaglobal&hours='+(statM?Math.max(1,Math.ceil(statM/60)):statH)))}
+  catch(e){const m=String(e.message);$('#vrchips').innerHTML='';
+    $('#vrbody').innerHTML='<div class="cmsg">'+(m.startsWith('501')?'Накатите <code>sql/24_visaglobal_report_owner.sql</code> в Supabase и обновите сервис.':'Не удалось загрузить: '+esc(m.slice(0,160)))+'</div>'}
+}
 applyPurposeUi();
-refresh();loadStats();loadDt();setInterval(refresh,10000);setInterval(loadStats,10000);setInterval(loadDt,15000);
+refresh();loadStats();loadDt();loadVr();setInterval(refresh,10000);setInterval(loadStats,10000);setInterval(loadDt,15000);setInterval(loadVr,15000);
 </script></body></html>
