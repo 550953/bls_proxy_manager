@@ -92,6 +92,15 @@ FAULT_CODES = frozenset({
     "PROXY_CONNECT_FAILED", "PROXY_TIMEOUT",
     "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
 })
+# Цели проверки для других задач (purpose): TCP-CONNECT до хоста, без TLS и без логина.
+PURPOSE_SITES = {
+    "visaglobal": (os.environ.get("VFS_SITE_HOST", "visa.vfsglobal.com"),
+                   int(os.environ.get("VFS_SITE_PORT", "443"))),
+}
+# Коды, после которых нужна проверка прокси (должны совпадать с error_codes.probe=true в БД).
+PURPOSE_PROBE_CODES = FAULT_CODES | frozenset({
+    "NET_PROXY_DEAD", "NET_TIMEOUT", "ERR_SOCKS_CONNECTION_FAILED",
+})
 _verify_inflight: set[str] = set()
 _verify_sema = asyncio.Semaphore(16)
 DASH_FILE = Path(__file__).with_name("dashboard.html")
@@ -735,7 +744,8 @@ app.include_router(admin)
 #   не прошёл, а напрямую открывается -> 'proxy_dead' (наказание остаётся)
 # --------------------------------------------------------------------------- #
 async def _tcp_via_proxy(scheme: str, host: str, port: int,
-                         username: Optional[str], password: Optional[str]) -> tuple[bool, str]:
+                         username: Optional[str], password: Optional[str],
+                         site_host: Optional[str] = None, site_port: Optional[int] = None) -> tuple[bool, str]:
     """TCP-CONNECT до SITE_HOST:SITE_PORT через прокси. Возвращает (ok, причина)."""
     writer = None
     try:
@@ -745,6 +755,8 @@ async def _tcp_via_proxy(scheme: str, host: str, port: int,
         async def rd(n: int) -> bytes:
             return await asyncio.wait_for(reader.readexactly(n), timeout=SITE_CHECK_TIMEOUT)
 
+        t_host = site_host or SITE_HOST
+        t_port = site_port or SITE_PORT
         if scheme in ("socks5", "socks5h"):
             writer.write(b"\x05\x02\x00\x02" if username else b"\x05\x01\x00")
             await writer.drain()
@@ -758,8 +770,8 @@ async def _tcp_via_proxy(scheme: str, host: str, port: int,
                 _, status = await rd(2)
                 if status != 0:
                     return False, "socks_auth_failed"
-            name = SITE_HOST.encode()
-            writer.write(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + SITE_PORT.to_bytes(2, "big"))
+            name = t_host.encode()
+            writer.write(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + t_port.to_bytes(2, "big"))
             await writer.drain()
             head = await rd(4)
             rep_code, atyp = head[1], head[3]
@@ -778,7 +790,7 @@ async def _tcp_via_proxy(scheme: str, host: str, port: int,
             token = base64.b64encode(f"{username}:{password or ''}".encode()).decode()
             auth = f"Proxy-Authorization: Basic {token}\r\n"
         writer.write(
-            f"CONNECT {SITE_HOST}:{SITE_PORT} HTTP/1.1\r\nHost: {SITE_HOST}:{SITE_PORT}\r\n{auth}\r\n".encode())
+            f"CONNECT {t_host}:{t_port} HTTP/1.1\r\nHost: {t_host}:{t_port}\r\n{auth}\r\n".encode())
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout=SITE_CHECK_TIMEOUT)
         parts = line.split()
@@ -794,10 +806,10 @@ async def _tcp_via_proxy(scheme: str, host: str, port: int,
                 pass
 
 
-async def _tcp_direct() -> bool:
+async def _tcp_direct(site_host: Optional[str] = None, site_port: Optional[int] = None) -> bool:
     try:
         _, w = await asyncio.wait_for(
-            asyncio.open_connection(SITE_HOST, SITE_PORT), timeout=SITE_CHECK_TIMEOUT)
+            asyncio.open_connection(site_host or SITE_HOST, site_port or SITE_PORT), timeout=SITE_CHECK_TIMEOUT)
         w.close()
         return True
     except Exception:
@@ -842,21 +854,72 @@ async def _verify_fault(proxy_id: str) -> None:
         _verify_inflight.discard(proxy_id)
 
 
-async def _schedule_fault_check(lease_id: str, error_code: Optional[str]) -> None:
-    """Вызывается ПОСЛЕ записи сбоя в БД; сама проверка идёт в фоне и бота не задерживает."""
-    if not error_code or error_code.strip().upper() not in FAULT_CODES:
+async def _verify_purpose_fault(proxy_id: str, purpose: str) -> None:
+    key = f"{purpose}:{proxy_id}"
+    site = PURPOSE_SITES.get(purpose)
+    if site is None or key in _verify_inflight:
         return
+    _verify_inflight.add(key)
     try:
-        # Проверка «прокси мёртв или сайт лёг» написана под BLS (TCP до BLS, состояние proxy_state).
-        # Для других целей решает справочник error_codes в БД, а эта проверка могла бы «простить» чужой сбой BLS.
-        if await pools["reporter"].fetchval(f"select {SCHEMA}.lease_purpose($1::uuid)", lease_id) != "bls":
-            return
-        proxy_id = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_proxy($1::uuid)", lease_id)
+        async with _verify_sema:
+            pool = pools["prober"]
+            job = await pool.fetchrow(
+                f"select * from {SCHEMA}.purpose_fault_job($1, $2)", proxy_id, purpose)
+            if not job:  # проверка выключена, сбой старый или вердикт уже есть
+                return
+            attempts = max(1, min(5, int(job.get("attempts") or 1)))
+            ok, why, done = False, "", 0
+            for i in range(attempts):
+                done = i + 1
+                ok, why = await _tcp_via_proxy(
+                    job["scheme"], job["host"], job["port"], job["username"], job["password"],
+                    site[0], site[1])
+                if ok:
+                    break
+                if i + 1 < attempts:
+                    await asyncio.sleep(SITE_CHECK_RETRY_DELAY)
+            if attempts > 1:
+                why = f"{why} (попыток: {done}/{attempts})"
+            if ok:
+                verdict = "transient"
+            elif not await _tcp_direct(site[0], site[1]):
+                verdict = "site_down"
+            else:
+                verdict = "proxy_dead"
+            await pool.execute(
+                f"select {SCHEMA}.purpose_fault_verdict($1, $2, $3, $4::jsonb)",
+                proxy_id, purpose, verdict,
+                json.dumps({"tcp_via_proxy": why, "target": f"{site[0]}:{site[1]}"}))
+            log.info("purpose fault check %s/%s -> %s (%s)", purpose, proxy_id, verdict, why)
+    except Exception:
+        log.exception("purpose fault check failed for %s/%s", purpose, proxy_id)
+    finally:
+        _verify_inflight.discard(key)
+
+
+async def _schedule_fault_check(lease_id: str, error_code: Optional[str]) -> None:
+    """Вызывается ПОСЛЕ записи сбоя в БД; сама проверка идёт в фоне и бота не задерживает.
+    BLS: старая проверка (proxy_state). Остальные задачи: purpose_fault_job/purpose_fault_verdict
+    (proxy_purpose_state), цель берётся из PURPOSE_SITES."""
+    if not error_code:
+        return
+    code = error_code.strip().upper()
+    try:
+        purpose = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_purpose($1::uuid)", lease_id)
+        proxy_id = None
+        if purpose == "bls" and code in FAULT_CODES:
+            proxy_id = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_proxy($1::uuid)", lease_id)
+        elif purpose != "bls" and code in PURPOSE_PROBE_CODES and purpose in PURPOSE_SITES:
+            proxy_id = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_proxy($1::uuid)", lease_id)
     except Exception:
         log.exception("lease_proxy failed")
         return
-    if proxy_id:
+    if not proxy_id:
+        return
+    if purpose == "bls":
         asyncio.create_task(_verify_fault(proxy_id), name=f"verify_fault:{proxy_id}")
+    else:
+        asyncio.create_task(_verify_purpose_fault(proxy_id, purpose), name=f"verify_fault:{purpose}:{proxy_id}")
 
 
 # --------------------------------------------------------------------------- #
