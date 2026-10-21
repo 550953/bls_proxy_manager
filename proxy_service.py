@@ -318,6 +318,20 @@ async def renew(req: RenewRequest, scope: str = Depends(require_bot)):
     return {"expires_at": until.isoformat()}
 
 
+async def _lease_verdict(lease_id: str) -> dict:
+    """Вердикт сервера по аренде для клиента: {verdict, cooldown_s, next_action, change_ip, blame, code}.
+    Для BLS и при любой ошибке возвращает пустой словарь, чтобы старые клиенты не ломались."""
+    try:
+        raw = await pools["reporter"].fetchval(f"select {SCHEMA}.lease_verdict($1::uuid)", lease_id)
+        data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        log.exception("lease_verdict failed")
+        return {}
+    if not isinstance(data, dict) or data.get("verdict") == "n/a":
+        return {}
+    return data
+
+
 @bot.post("/report")
 async def report(req: ReportRequest, scope: str = Depends(require_bot)):
     await _check_lease_scope(req.lease_id, scope)
@@ -329,7 +343,10 @@ async def report(req: ReportRequest, scope: str = Depends(require_bot)):
         req.latency_ms, json.dumps(req.detail),
     )
     await _schedule_fault_check(req.lease_id, req.error_code)
-    return {"ok": True}
+    result = {"ok": True}
+    if req.event_type == "error" and req.error_code:
+        result.update(await _lease_verdict(req.lease_id))
+    return result
 
 
 @bot.post("/release")
@@ -340,7 +357,9 @@ async def release(req: ReleaseRequest, scope: str = Depends(require_bot)):
         req.lease_id, req.reason, req.error_code, req.phase, json.dumps(req.detail),
     )
     await _schedule_fault_check(req.lease_id, req.error_code)
-    return {"ok": True}
+    result = {"ok": True}
+    result.update(await _lease_verdict(req.lease_id))
+    return result
 
 
 class ProfileResetAck(BaseModel):
