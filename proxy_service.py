@@ -10,6 +10,7 @@
   * боты      — заголовок  X-Bot-Token. Токен привязан к цели (purpose):
                   $BLS_BOT_TOKEN              -> bls
                   $BLS_BOT_TOKEN_VISAGLOBAL   -> visaglobal   (не задан -> цель выключена)
+                  $BLS_BOT_TOKEN_GMAIL_LOGIN  -> gmail_login  (кликер Gmail; не задан -> цель выключена)
                   $BLS_BOT_CLIENTS_VISAGLOBAL -> имя1=токен1,имя2=токен2: токен клиента внутри цели;
                                                  клиент видит и меняет только свои аренды (client_id задаёт сервер)
                   токены из дашборда (карточка «Токены ботов», sql/25) -> то же, что BLS_BOT_CLIENTS_*, но без правки env
@@ -104,6 +105,8 @@ FAULT_CODES = frozenset({
 PURPOSE_SITES = {
     "visaglobal": (os.environ.get("VFS_SITE_HOST", "visa.vfsglobal.com"),
                    int(os.environ.get("VFS_SITE_PORT", "443"))),
+    "gmail_login": (os.environ.get("GMAIL_SITE_HOST", "accounts.google.com"),
+                    int(os.environ.get("GMAIL_SITE_PORT", "443"))),
 }
 # Коды, после которых нужна проверка прокси (должны совпадать с error_codes.probe=true в БД).
 PURPOSE_PROBE_CODES = FAULT_CODES | frozenset({
@@ -115,7 +118,7 @@ DASH_FILE = Path(__file__).with_name("dashboard.html")
 
 ALLOWED_SCHEMES = ("http", "https", "socks5", "socks5h")
 ALLOWED_KINDS = ("shared", "dedicated", "mobile")
-ALLOWED_PURPOSES = ("bls", "ocr", "visaglobal")
+ALLOWED_PURPOSES = ("bls", "ocr", "visaglobal", "gmail_login")
 
 
 def _load_purpose_tokens() -> None:

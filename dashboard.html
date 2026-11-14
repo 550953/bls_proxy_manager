@@ -69,6 +69,7 @@ td.num,th.num{text-align:right}
 .b-bls{background:var(--blsbg);color:var(--bls)}
 .b-ocr{background:var(--ocrbg);color:var(--ocr)}
 .b-vfs{background:#fde8f3;color:#a3236a}
+.b-gml{background:#e3eefd;color:#1a56b8}
 .b-sch{background:var(--ln2);color:var(--fg);font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:600;border:1px solid var(--ln)}
 .st{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600}
 .st.ok{background:var(--okbg);color:var(--ok)}.st.bad{background:var(--badbg);color:var(--bad)}
@@ -184,7 +185,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
   <div>
     <h1>Proxy Manager <span class="live" id="live">работает</span></h1>
     <div class="sub">Управление, проверка и мониторинг прокси</div>
-    <div class="seg" id="pseg" style="margin:8px 0 0"><button data-p="bls" class="on">BLS</button><button data-p="visaglobal">VisaGlobal</button><button data-p="ocr" title="Только график: OCR-запросы по часам. Таблицы и события остаются у выбранной цели">OCR</button></div>
+    <div class="seg" id="pseg" style="margin:8px 0 0"><button data-p="bls" class="on">BLS</button><button data-p="visaglobal">VisaGlobal</button><button data-p="gmail_login">Gmail</button><button data-p="ocr" title="Только график: OCR-запросы по часам. Таблицы и события остаются у выбранной цели">OCR</button></div>
   </div>
   <div class="upd" id="upd">—</div>
 </header>
@@ -203,7 +204,7 @@ input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--acc)}
       <select id="scheme" title="протокол"><option>socks5</option><option>http</option><option>https</option><option>socks5h</option></select>
       <select id="kind" title="тип"><option>shared</option><option>dedicated</option><option>mobile</option></select>
       <input id="pool" placeholder="пул (необязательно)" size="18">
-      <select id="purp" title="для кого прокси: bls = кликер (RU), ocr = Gemini (зарубежные)"><option value="bls">назначение: bls</option><option value="ocr">назначение: ocr</option><option value="bls,ocr">назначение: bls+ocr</option><option value="visaglobal">назначение: visaglobal</option><option value="bls,visaglobal">назначение: bls+visaglobal</option></select>
+      <select id="purp" title="для кого прокси: bls = кликер (RU), ocr = Gemini (зарубежные)"><option value="bls">назначение: bls</option><option value="ocr">назначение: ocr</option><option value="bls,ocr">назначение: bls+ocr</option><option value="visaglobal">назначение: visaglobal</option><option value="bls,visaglobal">назначение: bls+visaglobal</option><option value="gmail_login">назначение: gmail_login</option><option value="bls,gmail_login">назначение: bls+gmail_login</option></select>
       <label>одновременно аренд <input id="ml" type="number" min="1" max="10" value="1" style="width:64px"></label>
       <button class="p" id="add-btn">Добавить / обновить</button>
     </div>
@@ -296,8 +297,8 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const tm=x=>x?new Date(x).toLocaleTimeString('ru-RU'):'—';
 let S={summary:[],proxies:[],leases:[],events:[],settings:[]};const sel=new Set();
-// ---------- цель (BLS / VisaGlobal): у каждой свои кулдауны, карантины и настройки ----------
-const PNAME={bls:'BLS',visaglobal:'VisaGlobal'};
+// ---------- цель (BLS / VisaGlobal / Gmail): у каждой свои кулдауны, карантины и настройки ----------
+const PNAME={bls:'BLS',visaglobal:'VisaGlobal',gmail_login:'Gmail'};
 let PUR='bls';try{const v=localStorage.getItem('blsPurpose');if(PNAME[v])PUR=v}catch(e){}
 const isBlsMode=()=>PUR==='bls';
 const pq=()=>isBlsMode()?'':'?purpose='+PUR;
@@ -350,8 +351,8 @@ $('#cfg').addEventListener('change',e=>{const k=e.target.dataset.k;if(!k)return;
   run(async()=>{await api('/admin/api/settings',pj({key:k,value:+e.target.value}));$('#msg').textContent='сохранено: '+CFGX()[k]+' = '+e.target.value})});
 $('#resetrun').onclick=()=>run(async()=>{const r=await api('/admin/api/reset-run',pj({}));$('#msg').textContent='возвращено в работу: '+r.re_enabled});
 
-const PORD=['bls','visaglobal','ocr'];
-const pBadge=x=>`<span class="bdg b-${x==='ocr'?'ocr':x==='visaglobal'?'vfs':'bls'}">${esc(String(x).toUpperCase())}</span>`;
+const PORD=['bls','visaglobal','gmail_login','ocr'];
+const pBadge=x=>`<span class="bdg b-${x==='ocr'?'ocr':x==='visaglobal'?'vfs':x==='gmail_login'?'gml':'bls'}">${esc(String(x).toUpperCase())}</span>`;
 const sBadge=x=>`<span class="bdg b-sch">${esc(x)}</span>`;
 const purList=a=>[...a].sort((x,y)=>(PORD.indexOf(x)<0?9:PORD.indexOf(x))-(PORD.indexOf(y)<0?9:PORD.indexOf(y)));
 const zc=n=>n?'':'z';
@@ -448,7 +449,7 @@ document.querySelectorAll('#nav a').forEach(a=>a.addEventListener('click',()=>{i
 tg.onclick=()=>setMenu(app.classList.contains('collapsed'));
 
 // ---------- график: успешные циклы и ошибки ----------
-let statH=24,statM=0,statLast=null,CH=PUR; // CH — вкладка графика: bls | visaglobal | ocr (ocr не меняет остальную страницу)
+let statH=24,statM=0,statLast=null,CH=PUR; // CH — вкладка графика: bls | visaglobal | gmail_login | ocr (ocr не меняет остальную страницу)
 const nfmt=n=>Number(n).toLocaleString('ru-RU');
 const CODE_COL={HTTP_429:'#dc2626',HTTP_403:'#ea580c',CF_CHALLENGE_LOOP:'#7c3aed',PROXY_TIMEOUT:'#ca8a04',PROXY_CONNECT_FAILED:'#0891b2',UNKNOWN:'#94a3b8'};
 const PAL=['#db2777','#0d9488','#65a30d','#9333ea','#b45309','#0369a1'],NS_COL='#2563eb',CF='CF_CHALLENGE_LOOP';

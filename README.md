@@ -33,3 +33,16 @@
 1-й сбой — кулдаун 10 мин · 2-й — кулдаун 60 мин · 3-й в окне — выключено до «Сбросить ступени».
 После каждого сбоя — TCP-проверка BLS через прокси (на ступенях 2–3 до 3 попыток); «прощён», если прошёл или BLS лежит.
 Аудит: `select * from bls_proxy_manager.v_fault_audit;`
+
+## Цель gmail_login (кликер Gmail), этап A
+Только добавления, BLS/visaglobal/ocr не меняются. Порядок выката:
+1. `sql/27_snapshot.sql` — сохранить вывод («до»).
+2. `sql/27_gmail_login_purpose.sql` (в транзакции, безвреден без кода), затем `sql/27_test.sql` (в конце rollback,
+   успех = `ВСЕ ТЕСТЫ 27 ПРОШЛИ`), затем снова `27_snapshot.sql` и сравнить с «до».
+3. Токен: `BLS_BOT_TOKEN_GMAIL_LOGIN=...` в `/etc/bls-proxy.env` (без него цель неактивна).
+4. `git push` — сервер подтянет сам (автообновление откатит коммит, если `/livez` не ответит).
+5. `sql/27_enable_gmail_login.sql` — вписать 2–3 id тестовых прокси.
+6. `python3 deploy/smoke_gmail_login.py --base ... --token-gmail ... [--token-visa ...] [--token-bls ...]`.
+Откат: `sql/27_ROLLBACK.sql` (удаляет только строки gmail_login, возвращает функцию `admin_upsert_proxies` и check токенов).
+Проверка цели после сбоя идёт на `accounts.google.com:443` (env `GMAIL_SITE_HOST`, `GMAIL_SITE_PORT`).
+Юнит-тест: `python3 -I tests/test_gmail_purpose_unit.py proxy_service.py`.
