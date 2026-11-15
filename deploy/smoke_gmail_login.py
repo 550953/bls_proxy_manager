@@ -89,8 +89,15 @@ def main():
             check(f"токен {name} -> acquire gmail_login = 403", c == 403, c)
 
     print("== 3. пустая выдача")
-    c, js, _ = call(a.base, "/acquire", G, {"account_id": "smoke-all", "count": 50, "ttl_seconds": 60, "purpose": "gmail_login"})
-    taken = [x["lease_id"] for x in (js.get("leases") or [])]
+    # acquire отдаёт не больше 5 прокси за вызов (least(count, 5) в SQL), поэтому выбираем всё пачками
+    taken = []
+    for i in range(80):
+        c, js, _ = call(a.base, "/acquire", G, {"account_id": f"smoke-all-{i}", "count": 5, "ttl_seconds": 60, "purpose": "gmail_login"})
+        got = [x["lease_id"] for x in (js.get("leases") or [])]
+        if not got:
+            break
+        taken += got
+    print(f"   взято аренд для опустошения пула: {len(taken)}")
     c2, js2, _ = call(a.base, "/acquire", G, {"account_id": "smoke-empty", "count": 1, "ttl_seconds": 60, "purpose": "gmail_login"})
     check("пустая выдача: leases=[] и есть retry_after_seconds", c2 == 200 and js2.get("leases") == [] and "retry_after_seconds" in js2, js2)
     for lid in taken:
